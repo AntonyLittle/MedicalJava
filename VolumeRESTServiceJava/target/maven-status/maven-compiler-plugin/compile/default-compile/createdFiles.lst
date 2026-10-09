@@ -1,0 +1,8 @@
+com/medicaljava/volumerestservice/repository/PatientRepository.class
+com/medicaljava/volumerestservice/VolumeRestServiceApplication.class
+com/medicaljava/volumerestservice/controller/PatientsController.class
+com/medicaljava/volumerestservice/model/Slice.class
+com/medicaljava/volumerestservice/controller/VolumesController.class
+com/medicaljava/volumerestservice/repository/PatientRepositoryImpl.class
+com/medicaljava/volumerestservice/model/Volume.class
+com/medicaljava/volumerestservice/model/Patient.class
