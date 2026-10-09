@@ -81,7 +81,7 @@ public class PatientRepositoryImpl implements PatientRepository {
                 Volume volume = new Volume(
                     volumes.size() + 1,
                     patientId,
-                    dir.getFileName().toString(),
+                    dir.getFileName().toString(),                    
                     "CT",
                     patient,
                     new ArrayList<>()
