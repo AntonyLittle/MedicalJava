@@ -136,7 +136,7 @@ public class PatientRepositoryImpl implements PatientRepository {
             short[] radiodensities = new short[width * height];
             ByteBuffer.wrap(pixelData).order(order).asShortBuffer().get(radiodensities);
 
-            return new Slice(patientId, volumeId, sliceIndex, sliceIndex, width, height, radiodensities);
+            return new Slice(sliceIndex, volumeId, patientId, sliceIndex, width, height, radiodensities);
         }
     }
 }
