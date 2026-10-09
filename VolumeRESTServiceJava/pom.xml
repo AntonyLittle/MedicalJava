@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>2.7.18</version>
+        <version>4.1.1</version>
         <relativePath/>
     </parent>
 
@@ -17,8 +17,9 @@
     <packaging>jar</packaging>
 
     <properties>
-        <java.version>11</java.version>
-        <dcm4che.version>5.31.2</dcm4che.version>
+        <!-- matches the JDK installed on this machine; Spring Boot 4 requires 17+ -->
+        <java.version>25</java.version>
+        <dcm4che.version>5.35.1</dcm4che.version>
     </properties>
 
     <!-- dcm4che is not published to Maven Central, only to its own repository -->

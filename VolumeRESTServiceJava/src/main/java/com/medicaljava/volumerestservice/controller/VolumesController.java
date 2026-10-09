@@ -33,16 +33,4 @@ public class VolumesController {
             return ResponseEntity.badRequest().build();
         }
     }
-
-    @PostMapping
-    public void post(@PathVariable int patientId, @RequestBody String value) {
-    }
-
-    @PutMapping("/{id}")
-    public void put(@PathVariable int patientId, @PathVariable int id, @RequestBody String value) {
-    }
-
-    @DeleteMapping("/{id}")
-    public void delete(@PathVariable int patientId, @PathVariable int id) {
-    }
 }

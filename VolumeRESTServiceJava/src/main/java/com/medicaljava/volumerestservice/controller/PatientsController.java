@@ -31,16 +31,4 @@ public class PatientsController {
             return ResponseEntity.badRequest().build();
         }
     }
-
-    @PostMapping
-    public void post(@RequestBody String value) {
-    }
-
-    @PutMapping("/{id}")
-    public void put(@PathVariable int id, @RequestBody String value) {
-    }
-
-    @DeleteMapping("/{id}")
-    public void delete(@PathVariable int id) {
-    }
 }

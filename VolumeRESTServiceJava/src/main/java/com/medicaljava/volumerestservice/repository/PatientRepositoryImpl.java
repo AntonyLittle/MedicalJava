@@ -46,10 +46,11 @@ public class PatientRepositoryImpl implements PatientRepository {
         List<Patient> patients = new ArrayList<>();
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(dataPath(), Files::isDirectory)) {
             for (Path dir : stream) {
-                Patient patient = new Patient();
-                patient.setPatientId(patients.size() + 1);
-                patient.setName(dir.getFileName().toString());
-                patient.setVolumes(new ArrayList<>());
+                Patient patient = new Patient(
+                    patients.size() + 1,
+                    dir.getFileName().toString(),
+                    new ArrayList<>()
+                );
                 patients.add(patient);
             }
         } catch (IOException e) {
@@ -61,7 +62,7 @@ public class PatientRepositoryImpl implements PatientRepository {
     @Override
     public Patient getPatient(int patientId) {
         return getPatientSummaries().stream()
-                .filter(p -> p.getPatientId() == patientId)
+                .filter(p -> p.patientId() == patientId)
                 .findFirst()
                 .orElseThrow(() -> new NoSuchElementException("Patient not found"));
     }
@@ -69,21 +70,22 @@ public class PatientRepositoryImpl implements PatientRepository {
     @Override
     public List<Volume> getVolumeSummaries(int patientId) {
         Patient patient = getPatientSummaries().stream()
-                .filter(p -> p.getPatientId() == patientId)
+                .filter(p -> p.patientId() == patientId)
                 .findFirst()
                 .orElseThrow(() -> new NoSuchElementException("Patient not found"));
 
         List<Volume> volumes = new ArrayList<>();
-        Path patientDir = dataPath().resolve(patient.getName());
+        Path patientDir = dataPath().resolve(patient.name());
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(patientDir, Files::isDirectory)) {
             for (Path dir : stream) {
-                Volume volume = new Volume();
-                volume.setPatientId(patientId);
-                volume.setPatient(patient);
-                volume.setVolumeId(volumes.size() + 1);
-                volume.setName(dir.getFileName().toString());
-                volume.setModality("CT");
-                volume.setSlices(new ArrayList<>());
+                Volume volume = new Volume(
+                    volumes.size() + 1,
+                    patientId,
+                    dir.getFileName().toString(),
+                    "CT",
+                    patient,
+                    new ArrayList<>()
+                );
                 volumes.add(volume);
             }
         } catch (IOException e) {
@@ -95,13 +97,13 @@ public class PatientRepositoryImpl implements PatientRepository {
     @Override
     public Volume getVolume(int patientId, int volumeId) {
         Volume volumeSummary = getVolumeSummaries(patientId).stream()
-                .filter(v -> v.getVolumeId() == volumeId)
+                .filter(v -> v.volumeId() == volumeId)
                 .findFirst()
                 .orElseThrow(() -> new NoSuchElementException("Volume not found"));
 
         Path seriesDir = dataPath()
-                .resolve(volumeSummary.getPatient().getName())
-                .resolve(volumeSummary.getName());
+                .resolve(volumeSummary.patient().name())
+                .resolve(volumeSummary.name());
 
         List<Slice> slices = new ArrayList<>();
         int sliceIndex = 0;
@@ -118,7 +120,7 @@ public class PatientRepositoryImpl implements PatientRepository {
             throw new RuntimeException(e);
         }
 
-        volumeSummary.setSlices(slices);
+        volumeSummary = volumeSummary.withSlices(slices);
         return volumeSummary;
     }
 
@@ -134,15 +136,7 @@ public class PatientRepositoryImpl implements PatientRepository {
             short[] radiodensities = new short[width * height];
             ByteBuffer.wrap(pixelData).order(order).asShortBuffer().get(radiodensities);
 
-            Slice slice = new Slice();
-            slice.setPatientId(patientId);
-            slice.setVolumeId(volumeId);
-            slice.setSliceId(sliceIndex);
-            slice.setIndex(sliceIndex);
-            slice.setWidth(width);
-            slice.setHeight(height);
-            slice.setRadiodensities(radiodensities);
-            return slice;
+            return new Slice(patientId, volumeId, sliceIndex, sliceIndex, width, height, radiodensities);
         }
     }
 }
