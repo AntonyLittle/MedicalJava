@@ -12,12 +12,18 @@ export interface Volume {
   slices: Slice[];
 }
 
-export interface Slice {
+export interface Slice extends RadioDensities{
   sliceId: number;
   volumeId: number;
   patientId: number;
   index: number;
-  width: number;
-  height: number;
+  widthMm: number;
+  heightMm: number;
+  depthPositionMm: number;
+}
+
+export interface RadioDensities {
+  widthPixels: number;
+  heightPixels: number;
   radiodensities: number[];
 }

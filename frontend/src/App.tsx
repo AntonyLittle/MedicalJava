@@ -3,7 +3,9 @@ import { Alert, Box, CircularProgress, Container, Typography } from '@mui/materi
 import { fetchPatients, fetchVolume, fetchVolumes } from './api/client';
 import type { Patient, Volume } from './api/types';
 import { HierarchySelector } from './components/HierarchySelector';
-import { VolumeViewer } from './components/VolumeViewer';
+import { CineVolumeViewer } from './components/CineVolumeViewer';
+import { WindowLevelControls } from './components/WindowLevelControls';
+import { SliceSlider } from './components/SliceSlider';
 
 const DEFAULT_WINDOW_LEVEL = 1000;
 const DEFAULT_WINDOW_WIDTH = 2000;
@@ -76,15 +78,59 @@ function App() {
       <Box sx={{ mt: 4 }}>
         {loadingVolume && <CircularProgress />}
         {!loadingVolume && volume && (
-          <VolumeViewer
-            volume={volume}
-            sliceIndex={sliceIndex}
-            onSliceIndexChange={setSliceIndex}
-            windowLevel={windowLevel}
-            windowWidth={windowWidth}
-            onWindowLevelChange={setWindowLevel}
-            onWindowWidthChange={setWindowWidth}
-          />
+          <>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
+
+              <CineVolumeViewer
+                volume={volume}
+                sliceIndex={sliceIndex}
+                onSliceIndexChange={setSliceIndex}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+              />
+              <CineVolumeViewer
+                volume={volume}
+                sliceIndex={sliceIndex}
+                onSliceIndexChange={setSliceIndex}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+              />
+              <CineVolumeViewer
+                volume={volume}
+                sliceIndex={sliceIndex}
+                onSliceIndexChange={setSliceIndex}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+              />
+              <CineVolumeViewer
+                volume={volume}
+                sliceIndex={sliceIndex}
+                onSliceIndexChange={setSliceIndex}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+              />
+            </Box>
+
+            <SliceSlider
+              sliceCount={volume.slices.length}
+              sliceIndex={sliceIndex}
+              onChange={setSliceIndex}
+            />
+            <WindowLevelControls
+              windowLevel={windowLevel}
+              windowWidth={windowWidth}
+              onLevelChange={setWindowLevel}
+              onWidthChange={setWindowWidth}
+            />
+          </>
         )}
       </Box>
     </Container>

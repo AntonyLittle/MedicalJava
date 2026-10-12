@@ -5,6 +5,9 @@ public record Slice (
     int volumeId, 
     int patientId, 
     int index, 
-    int width, 
-    int height, 
+    int widthPixels, 
+    int heightPixels, 
+    int widthMm,
+    int heightMm,
+    int depthPositionMm,
     short[] radiodensities) {}

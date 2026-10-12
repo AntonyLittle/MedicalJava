@@ -84,7 +84,8 @@ public class PatientRepositoryImpl implements PatientRepository {
                     dir.getFileName().toString(),                    
                     "CT",
                     patient,
-                    new ArrayList<>()
+                    new ArrayList<>(),
+                    0,0,0
                 );
                 volumes.add(volume);
             }
@@ -120,7 +121,17 @@ public class PatientRepositoryImpl implements PatientRepository {
             throw new RuntimeException(e);
         }
 
-        volumeSummary = volumeSummary.withSlices(slices);
+        slices.sort((o1, o2) -> Integer.compare(o1.depthPositionMm(), o2.depthPositionMm()));
+
+        var firstSlice = slices.isEmpty() ? null : slices.get(0);
+        var lastSlice = slices.isEmpty() ? null : slices.get(slices.size() - 1);
+
+        volumeSummary = volumeSummary.withSlicesAndSpatial(
+            slices,
+            firstSlice == null ? 0 : firstSlice.widthMm(),
+            firstSlice == null ? 0 : firstSlice.heightMm(),
+            (lastSlice == null ? 0 : lastSlice.depthPositionMm()) - (firstSlice == null ? 0 : firstSlice.depthPositionMm())
+        );
         return volumeSummary;
     }
 
@@ -136,7 +147,12 @@ public class PatientRepositoryImpl implements PatientRepository {
             short[] radiodensities = new short[width * height];
             ByteBuffer.wrap(pixelData).order(order).asShortBuffer().get(radiodensities);
 
-            return new Slice(sliceIndex, volumeId, patientId, sliceIndex, width, height, radiodensities);
+            var pixelSpacing = dataset.getDoubles(Tag.PixelSpacing);
+            int widthMm = (int) (pixelSpacing[0] * width); // Replace with actual DICOM tag for width in mm
+            int heightMm = (int) (pixelSpacing[1] * height); // Replace with actual DICOM tag for height in mm
+            var imagePosition = dataset.getDoubles(Tag.ImagePositionPatient); // Replace with actual DICOM tag for depth position in mm
+
+            return new Slice(sliceIndex, volumeId, patientId, sliceIndex, width, height, widthMm, heightMm, (int) imagePosition[2], radiodensities);
         }
     }
 }

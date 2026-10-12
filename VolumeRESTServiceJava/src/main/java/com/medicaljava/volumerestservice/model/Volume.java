@@ -8,16 +8,22 @@ public record Volume(
     String name,
     String modality,
     Patient patient,
-    List<Slice> slices
+    List<Slice> slices,
+    int width,
+    int height,
+    int depth
 ) {
-    public Volume withSlices(List<Slice> slices) {
+    public Volume withSlicesAndSpatial(List<Slice> slices, int width, int height, int depth) {
         return new Volume(
             this.volumeId,
             this.patientId,
             this.name,
             this.modality,
             this.patient,
-            slices
+            slices,
+            width,
+            height,
+            depth
         );
     }
 }
