@@ -13,6 +13,7 @@ export interface Volume {
 }
 
 export interface Slice extends RadioDensities{
+  radiodensities: Int16Array;
   sliceId: number;
   volumeId: number;
   patientId: number;
@@ -29,5 +30,5 @@ export interface Slice extends RadioDensities{
 export interface RadioDensities {
   widthPixels: number;
   heightPixels: number;
-  radiodensities: number[];
+  radiodensities: ArrayLike<number>;
 }

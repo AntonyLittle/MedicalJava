@@ -53,7 +53,7 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
   }, [radioDensities, windowLevel, windowWidth, viewTransform, width, height]);
 
   function blitAndScaleRadiodensities(
-    radiodensities: number[],
+    radiodensities: ArrayLike<number>,
     radiodensityWidth: number,
     radiodensityHeight: number,
     context: CanvasRenderingContext2D,

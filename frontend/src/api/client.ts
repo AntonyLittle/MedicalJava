@@ -16,6 +16,11 @@ export function fetchVolumes(patientId: number): Promise<Volume[]> {
   return getJson<Volume[]>(`/api/Patients/${patientId}/Volumes`);
 }
 
-export function fetchVolume(patientId: number, volumeId: number): Promise<Volume> {
-  return getJson<Volume>(`/api/Patients/${patientId}/Volumes/${volumeId}`);
+export async function fetchVolume(patientId: number, volumeId: number): Promise<Volume> {
+  const volume = await getJson<Volume>(`/api/Patients/${patientId}/Volumes/${volumeId}`);
+  // The JSON arrives as plain number[]; Int16Array is about 4x smaller and faster to index.
+  for (const slice of volume.slices) {
+    slice.radiodensities = Int16Array.from(slice.radiodensities);
+  }
+  return volume;
 }

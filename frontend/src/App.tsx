@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useDeferredValue, useEffect, useMemo, useState } from 'react';
 import type { Coordinate, ViewablePlane } from './utils/canvasMath';
-import { getVolumeBounds } from './utils/mprSampler';
+import { getVolumeBounds, NORMAL_BY_ORIENTATION, type PlaneOrientation, type ProjectionMode } from './utils/mprSampler';
 import { Alert, Box, CircularProgress, Container, Typography } from '@mui/material';
 import { fetchPatients, fetchVolume, fetchVolumes } from './api/client';
 import type { Patient, Volume } from './api/types';
@@ -8,13 +8,12 @@ import { HierarchySelector } from './components/HierarchySelector';
 import { CineVolumeViewer } from './components/CineVolumeViewer';
 import { WindowLevelControls } from './components/WindowLevelControls';
 import { ThinMprVolumeViewer } from './components/ThinMprVolumeViewer';
+import { ThickMprVolumeViewer } from './components/ThickMprVolumeViewer';
+import { ThickMprControls } from './components/ThickMprControls';
 
 const DEFAULT_WINDOW_LEVEL = 1000;
 const DEFAULT_WINDOW_WIDTH = 2000;
-
-const AXIAL_NORMAL: Coordinate = { x: 0, y: 0, z: 1 };
-const CORONAL_NORMAL: Coordinate = { x: 0, y: 1, z: 0 };
-const SAGITTAL_NORMAL: Coordinate = { x: 1, y: 0, z: 0 };
+const DEFAULT_SLAB_THICKNESS_MM = 10;
 
 function App() {
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -27,10 +26,14 @@ function App() {
   const [sliceIndex, setSliceIndex] = useState(0);
 
   const [mprPosition, setMprPosition] = useState<Coordinate>({ x: 0, y: 0, z: 0 });
-  const axialPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: AXIAL_NORMAL }), [mprPosition]);
-  const coronalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: CORONAL_NORMAL }), [mprPosition]);
-  const sagittalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: SAGITTAL_NORMAL }), [mprPosition]);
+  const axialPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: NORMAL_BY_ORIENTATION.axial }), [mprPosition]);
+  const coronalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: NORMAL_BY_ORIENTATION.coronal }), [mprPosition]);
+  const sagittalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: NORMAL_BY_ORIENTATION.sagittal }), [mprPosition]);
   const handleMprPlaneChange = (plane: ViewablePlane) => setMprPosition(plane.positionXyz);
+
+  const [slabThicknessMm, setSlabThicknessMm] = useState(DEFAULT_SLAB_THICKNESS_MM);
+  const deferredSlabThicknessMm = useDeferredValue(slabThicknessMm);
+  const [projectionMode, setProjectionMode] = useState<ProjectionMode>('average');
 
   const [windowLevel, setWindowLevel] = useState(DEFAULT_WINDOW_LEVEL);
   const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH);
@@ -97,8 +100,7 @@ function App() {
         {loadingVolume && <CircularProgress />}
         {!loadingVolume && volume && (
           <>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2, mb: 2 }}>
               <CineVolumeViewer
                 volume={volume}
                 sliceIndex={sliceIndex}
@@ -108,6 +110,8 @@ function App() {
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
               />
+            </Box>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
               <ThinMprVolumeViewer
                 volume={volume}
                 viewablePlane={axialPlane}
@@ -116,6 +120,17 @@ function App() {
                 windowWidth={windowWidth}
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
+              />
+              <ThickMprVolumeViewer
+                volume={volume}
+                viewablePlane={axialPlane}
+                onViewablePlaneChange={handleMprPlaneChange}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+                slabThicknessMm={deferredSlabThicknessMm}
+                projectionMode={projectionMode}
               />
               <ThinMprVolumeViewer
                 volume={volume}
@@ -126,6 +141,17 @@ function App() {
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
               />
+              <ThickMprVolumeViewer
+                volume={volume}
+                viewablePlane={coronalPlane}
+                onViewablePlaneChange={handleMprPlaneChange}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+                slabThicknessMm={deferredSlabThicknessMm}
+                projectionMode={projectionMode}
+              />
               <ThinMprVolumeViewer
                 volume={volume}
                 viewablePlane={sagittalPlane}
@@ -134,6 +160,17 @@ function App() {
                 windowWidth={windowWidth}
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
+              />
+              <ThickMprVolumeViewer
+                volume={volume}
+                viewablePlane={sagittalPlane}
+                onViewablePlaneChange={handleMprPlaneChange}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+                slabThicknessMm={deferredSlabThicknessMm}
+                projectionMode={projectionMode}
               />
             </Box>
 
@@ -146,6 +183,12 @@ function App() {
               windowWidth={windowWidth}
               onLevelChange={setWindowLevel}
               onWidthChange={setWindowWidth}
+            />
+            <ThickMprControls
+              slabThicknessMm={slabThicknessMm}
+              projectionMode={projectionMode}
+              onSlabThicknessChange={setSlabThicknessMm}
+              onProjectionModeChange={setProjectionMode}
             />
             <Typography>MPR Position: {mprPosition.x.toFixed(1)}, {mprPosition.y.toFixed(1)}, {mprPosition.z.toFixed(1)}</Typography>
           </>
