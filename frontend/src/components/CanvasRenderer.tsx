@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useRef } from 'react';
 import type { PointerEvent } from 'react';
 import type { RadioDensities } from '../api/types';
+import { IDENTITY_VIEW_TRANSFORM, type ViewTransform } from '../utils/canvasMath';
 import { mergeRefs } from '../utils/mergeRefs';
 
 interface CanvasRendererProps {
@@ -9,6 +10,7 @@ interface CanvasRendererProps {
   radioDensities?: RadioDensities;
   windowLevel: number;
   windowWidth: number;
+  viewTransform?: ViewTransform;
   onPointerDown?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerMove?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerUp?: (e: PointerEvent<HTMLCanvasElement>) => void;
@@ -27,7 +29,7 @@ function voxelToGray(hu: number, windowLevel: number, windowWidth: number): numb
 }
 
 export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>(function CanvasRenderer(
-  { width, height, radioDensities, windowLevel, windowWidth, onPointerDown, onPointerMove, onPointerUp },
+  { width, height, radioDensities, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp },
   forwardedRef
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -48,7 +50,7 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
 
     blitAndScaleRadiodensities(radioDensities.radiodensities, radioDensities.widthPixels, radioDensities.heightPixels, context, width, height);
 
-  }, [radioDensities, windowLevel, windowWidth, width, height]);
+  }, [radioDensities, windowLevel, windowWidth, viewTransform, width, height]);
 
   function blitAndScaleRadiodensities(
     radiodensities: number[],
@@ -70,10 +72,13 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
       for (let x = 0; x < canvasWidth; x++) {
         const offset = ((y * canvasWidth) + x) * 4;
 
-        const radiodensityX = Math.floor(x * scale);
-        const radiodensityY = Math.floor(y * scale);
+        // Inverse of the view transform: canvas pixel -> unzoomed, unpanned canvas pixel.
+        const unzoomedX = (x - canvasWidth / 2 - viewTransform.panX) / viewTransform.zoom + canvasWidth / 2;
+        const unzoomedY = (y - canvasHeight / 2 - viewTransform.panY) / viewTransform.zoom + canvasHeight / 2;
+        const radiodensityX = Math.floor(unzoomedX * scale);
+        const radiodensityY = Math.floor(unzoomedY * scale);
 
-        if (radiodensityY < radiodensityHeight && radiodensityX < radiodensityWidth) {
+        if (radiodensityY >= 0 && radiodensityX >= 0 && radiodensityY < radiodensityHeight && radiodensityX < radiodensityWidth) {
           const intensity = (radiodensityY * radiodensityWidth) + radiodensityX;
           const gray = voxelToGray(radiodensities[intensity], windowLevel, windowWidth);
 
@@ -81,9 +86,9 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
           data[offset + 1] = gray;
           data[offset + 2] = gray;
         } else {
-          data[offset] = 255;
+          data[offset] = 0;
           data[offset + 1] = 0;
-          data[offset + 2] = 255;
+          data[offset + 2] = 0;
         }
         data[offset + 3] = 255;
       }

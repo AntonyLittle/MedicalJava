@@ -2,9 +2,7 @@ import { useRef } from 'react';
 import type { Volume } from '../api/types';
 import { CanvasRenderer } from './CanvasRenderer';
 import { useWheelSliceScroll as useWheelScroll } from '../hooks/useWheelSliceScroll';
-import { useSliceDrag } from '../hooks/useSliceDrag';
-import { useWlwwDrag } from '../hooks/useWlwwDrag';
-import { usePointerDragMode } from '../hooks/usePointerDragMode';
+import { useViewerInteractions } from '../hooks/useViewerInteractions';
 import { useSliceRadioDensities } from '../hooks/useSliceRadioDensities';
 
 interface VolumeViewerProps {
@@ -30,14 +28,11 @@ export function CineVolumeViewer({
   const maxSliceIndex = volume.slices.length - 1;
   const radioDensities = useSliceRadioDensities(volume, sliceIndex);
 
-  const computeSliceDrag = useSliceDrag(maxSliceIndex, onSliceIndexChange);
-  const computeWlwwDrag = useWlwwDrag(onWindowLevelChange, onWindowWidthChange);
-  const handlePointerEvent = usePointerDragMode({
-    sliceIndex,
+  const { viewTransform, handlePointerEvent } = useViewerInteractions({
     windowLevel,
     windowWidth,
-    onSliceDrag: computeSliceDrag,
-    onWlwwDrag: computeWlwwDrag,
+    onWindowLevelChange,
+    onWindowWidthChange,
   });
   useWheelScroll(canvasRef, sliceIndex, maxSliceIndex, onSliceIndexChange);
 
@@ -49,6 +44,7 @@ export function CineVolumeViewer({
       radioDensities={radioDensities}
       windowLevel={windowLevel}
       windowWidth={windowWidth}
+      viewTransform={viewTransform}
       onPointerDown={handlePointerEvent}
       onPointerMove={handlePointerEvent}
       onPointerUp={handlePointerEvent}

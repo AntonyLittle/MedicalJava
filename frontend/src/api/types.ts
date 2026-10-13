@@ -20,6 +20,10 @@ export interface Slice extends RadioDensities{
   widthMm: number;
   heightMm: number;
   depthPositionMm: number;
+  originXMm: number;
+  originYMm: number;
+  pixelSpacingXMm: number;
+  pixelSpacingYMm: number;
 }
 
 export interface RadioDensities {

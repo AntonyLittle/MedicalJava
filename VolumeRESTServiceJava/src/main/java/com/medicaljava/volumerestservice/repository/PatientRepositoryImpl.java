@@ -121,16 +121,16 @@ public class PatientRepositoryImpl implements PatientRepository {
             throw new RuntimeException(e);
         }
 
-        slices.sort((o1, o2) -> Integer.compare(o1.depthPositionMm(), o2.depthPositionMm()));
+        slices.sort((o1, o2) -> Double.compare(o1.depthPositionMm(), o2.depthPositionMm()));
 
         var firstSlice = slices.isEmpty() ? null : slices.get(0);
         var lastSlice = slices.isEmpty() ? null : slices.get(slices.size() - 1);
 
         volumeSummary = volumeSummary.withSlicesAndSpatial(
             slices,
-            firstSlice == null ? 0 : firstSlice.widthMm(),
-            firstSlice == null ? 0 : firstSlice.heightMm(),
-            (lastSlice == null ? 0 : lastSlice.depthPositionMm()) - (firstSlice == null ? 0 : firstSlice.depthPositionMm())
+            firstSlice == null ? 0 : (int) firstSlice.widthMm(),
+            firstSlice == null ? 0 : (int) firstSlice.heightMm(),
+            (int) ((lastSlice == null ? 0 : lastSlice.depthPositionMm()) - (firstSlice == null ? 0 : firstSlice.depthPositionMm()))
         );
         return volumeSummary;
     }
@@ -147,12 +147,15 @@ public class PatientRepositoryImpl implements PatientRepository {
             short[] radiodensities = new short[width * height];
             ByteBuffer.wrap(pixelData).order(order).asShortBuffer().get(radiodensities);
 
+            // DICOM PixelSpacing is [row spacing (y), column spacing (x)].
             var pixelSpacing = dataset.getDoubles(Tag.PixelSpacing);
-            int widthMm = (int) (pixelSpacing[0] * width); // Replace with actual DICOM tag for width in mm
-            int heightMm = (int) (pixelSpacing[1] * height); // Replace with actual DICOM tag for height in mm
-            var imagePosition = dataset.getDoubles(Tag.ImagePositionPatient); // Replace with actual DICOM tag for depth position in mm
+            double pixelSpacingY = pixelSpacing[0];
+            double pixelSpacingX = pixelSpacing[1];
+            var imagePosition = dataset.getDoubles(Tag.ImagePositionPatient);
 
-            return new Slice(sliceIndex, volumeId, patientId, sliceIndex, width, height, widthMm, heightMm, (int) imagePosition[2], radiodensities);
+            return new Slice(sliceIndex, volumeId, patientId, sliceIndex, width, height,
+                pixelSpacingX * width, pixelSpacingY * height, imagePosition[2],
+                imagePosition[0], imagePosition[1], pixelSpacingX, pixelSpacingY, radiodensities);
         }
     }
 }

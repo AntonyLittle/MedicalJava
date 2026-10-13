@@ -1,14 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { Coordinate, ViewablePlane } from './utils/canvasMath';
+import { getVolumeBounds } from './utils/mprSampler';
 import { Alert, Box, CircularProgress, Container, Typography } from '@mui/material';
 import { fetchPatients, fetchVolume, fetchVolumes } from './api/client';
 import type { Patient, Volume } from './api/types';
 import { HierarchySelector } from './components/HierarchySelector';
 import { CineVolumeViewer } from './components/CineVolumeViewer';
 import { WindowLevelControls } from './components/WindowLevelControls';
-import { SliceSlider } from './components/SliceSlider';
+import { ThinMprVolumeViewer } from './components/ThinMprVolumeViewer';
 
 const DEFAULT_WINDOW_LEVEL = 1000;
 const DEFAULT_WINDOW_WIDTH = 2000;
+
+const AXIAL_NORMAL: Coordinate = { x: 0, y: 0, z: 1 };
+const CORONAL_NORMAL: Coordinate = { x: 0, y: 1, z: 0 };
+const SAGITTAL_NORMAL: Coordinate = { x: 1, y: 0, z: 0 };
 
 function App() {
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -19,6 +25,12 @@ function App() {
 
   const [volume, setVolume] = useState<Volume | null>(null);
   const [sliceIndex, setSliceIndex] = useState(0);
+
+  const [mprPosition, setMprPosition] = useState<Coordinate>({ x: 0, y: 0, z: 0 });
+  const axialPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: AXIAL_NORMAL }), [mprPosition]);
+  const coronalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: CORONAL_NORMAL }), [mprPosition]);
+  const sagittalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: SAGITTAL_NORMAL }), [mprPosition]);
+  const handleMprPlaneChange = (plane: ViewablePlane) => setMprPosition(plane.positionXyz);
 
   const [windowLevel, setWindowLevel] = useState(DEFAULT_WINDOW_LEVEL);
   const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH);
@@ -49,7 +61,13 @@ function App() {
 
     setLoadingVolume(true);
     fetchVolume(selectedPatientId, selectedVolumeId)
-      .then(setVolume)
+      .then((v) => {
+        setVolume(v);
+        if (v.slices.length > 0) {
+          const { min, max } = getVolumeBounds(v);
+          setMprPosition({ x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 });
+        }
+      })
       .catch((e) => setError(String(e)))
       .finally(() => setLoadingVolume(false));
   }, [selectedPatientId, selectedVolumeId]);
@@ -90,28 +108,28 @@ function App() {
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
               />
-              <CineVolumeViewer
+              <ThinMprVolumeViewer
                 volume={volume}
-                sliceIndex={sliceIndex}
-                onSliceIndexChange={setSliceIndex}
+                viewablePlane={axialPlane}
+                onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
               />
-              <CineVolumeViewer
+              <ThinMprVolumeViewer
                 volume={volume}
-                sliceIndex={sliceIndex}
-                onSliceIndexChange={setSliceIndex}
+                viewablePlane={coronalPlane}
+                onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
               />
-              <CineVolumeViewer
+              <ThinMprVolumeViewer
                 volume={volume}
-                sliceIndex={sliceIndex}
-                onSliceIndexChange={setSliceIndex}
+                viewablePlane={sagittalPlane}
+                onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
                 onWindowLevelChange={setWindowLevel}
@@ -119,17 +137,17 @@ function App() {
               />
             </Box>
 
-            <SliceSlider
-              sliceCount={volume.slices.length}
-              sliceIndex={sliceIndex}
-              onChange={setSliceIndex}
-            />
+
+            <Typography gutterBottom>
+              Slice {sliceIndex + 1} of {volume.slices.length}
+            </Typography>
             <WindowLevelControls
               windowLevel={windowLevel}
               windowWidth={windowWidth}
               onLevelChange={setWindowLevel}
               onWidthChange={setWindowWidth}
             />
+            <Typography>MPR Position: {mprPosition.x.toFixed(1)}, {mprPosition.y.toFixed(1)}, {mprPosition.z.toFixed(1)}</Typography>
           </>
         )}
       </Box>
