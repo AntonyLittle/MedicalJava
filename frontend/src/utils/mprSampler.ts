@@ -3,11 +3,15 @@ import { moveViewablePlaneForward, type Coordinate, type ViewablePlane } from '.
 
 export type PlaneOrientation = 'axial' | 'coronal' | 'sagittal';
 
-export const NORMAL_BY_ORIENTATION: Record<PlaneOrientation, Coordinate> = {
-  axial: { x: 0, y: 0, z: 1 },
-  coronal: { x: 0, y: 1, z: 0 },
-  sagittal: { x: 1, y: 0, z: 0 },
+// In-plane axes of the unrotated views; a plane matching these can use the faster separable sampling.
+const CANONICAL_AXES: Record<PlaneOrientation, { right: Coordinate; down: Coordinate }> = {
+  axial: { right: { x: 1, y: 0, z: 0 }, down: { x: 0, y: 1, z: 0 } },
+  coronal: { right: { x: 1, y: 0, z: 0 }, down: { x: 0, y: 0, z: -1 } },
+  sagittal: { right: { x: 0, y: 1, z: 0 }, down: { x: 0, y: 0, z: -1 } },
 };
+
+// Output pixel spacing multiplier for the cheap result shown while a plane is being rotated.
+export const PREVIEW_SPACING_SCALE = 2;
 
 export type ProjectionMode = 'average' | 'max' | 'min';
 
@@ -15,6 +19,7 @@ export interface SlabOptions {
   thicknessMm: number;
   mode: ProjectionMode;
   maxSamples?: number;
+  spacingScale?: number;
 }
 
 // Bounds the cost of a slab update: each sample is a full cross-section.
@@ -125,19 +130,56 @@ export function slabSampleCount(
   return Math.min(maxSamples, Math.floor(thicknessMm / spacingAlongNormal(volume, orientation)) + 1);
 }
 
-// Only the position along the dominant normal axis changes the sampled image, so hooks key on these.
-export function planeOrientationAndOffset(plane: ViewablePlane): { orientation: PlaneOrientation; offsetMm: number } {
-  const orientation = orientationFromNormal(plane.normalXyz);
-  const axis = orientation === 'axial' ? 'z' : orientation === 'coronal' ? 'y' : 'x';
-  return { orientation, offsetMm: plane.positionXyz[axis] };
+function dot(a: Coordinate, b: Coordinate): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-export function planeFromOrientation(orientation: PlaneOrientation, offsetMm: number): ViewablePlane {
-  const positionXyz = { x: 0, y: 0, z: 0 };
-  if (orientation === 'axial') positionXyz.z = offsetMm;
-  else if (orientation === 'coronal') positionXyz.y = offsetMm;
-  else positionXyz.x = offsetMm;
-  return { positionXyz, normalXyz: NORMAL_BY_ORIENTATION[orientation] };
+function volumeCentre(volume: Volume): Coordinate {
+  if (volume.slices.length === 0) return { x: 0, y: 0, z: 0 };
+  const { min, max } = getVolumeBounds(volume);
+  return { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
+}
+
+type PlaneAxes = Pick<ViewablePlane, 'normalXyz' | 'rightXyz' | 'downXyz'>;
+
+function closeTo(a: Coordinate, b: Coordinate): boolean {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z) < 1e-4;
+}
+
+export function isAxisAligned(plane: PlaneAxes): boolean {
+  const axes = CANONICAL_AXES[orientationFromNormal(plane.normalXyz)];
+  return closeTo(plane.rightXyz, axes.right) && closeTo(plane.downXyz, axes.down);
+}
+
+// The sampled image depends only on the plane's axes and its offset along the normal from the volume centre.
+export interface PlaneParams extends PlaneAxes {
+  offsetMm: number;
+}
+
+export function planeParams(volume: Volume, plane: ViewablePlane): PlaneParams {
+  const centre = volumeCentre(volume);
+  const p = plane.positionXyz;
+  return {
+    offsetMm: dot({ x: p.x - centre.x, y: p.y - centre.y, z: p.z - centre.z }, plane.normalXyz),
+    normalXyz: plane.normalXyz,
+    rightXyz: plane.rightXyz,
+    downXyz: plane.downXyz,
+  };
+}
+
+export function planeFromParams(volume: Volume, params: PlaneParams): ViewablePlane {
+  const centre = volumeCentre(volume);
+  const n = params.normalXyz;
+  return {
+    positionXyz: {
+      x: centre.x + n.x * params.offsetMm,
+      y: centre.y + n.y * params.offsetMm,
+      z: centre.z + n.z * params.offsetMm,
+    },
+    normalXyz: n,
+    rightXyz: params.rightXyz,
+    downXyz: params.downXyz,
+  };
 }
 
 interface PlaneGrid {
@@ -150,9 +192,8 @@ function outputSpacing(volume: Volume): number {
   return Math.min(volume.slices[0].pixelSpacingXMm, volume.slices[0].pixelSpacingYMm);
 }
 
-function planeGrid(volume: Volume, orientation: PlaneOrientation): PlaneGrid {
+function planeGrid(volume: Volume, orientation: PlaneOrientation, spacing: number): PlaneGrid {
   const bounds = getVolumeBounds(volume);
-  const spacing = outputSpacing(volume);
   const cells = (min: number, max: number) => Math.floor((max - min) / spacing) + 1;
 
   if (orientation === 'axial') {
@@ -168,6 +209,7 @@ function samplePlane(
   volume: Volume,
   viewablePlane: ViewablePlane,
   grid: PlaneGrid,
+  outSpacing: number,
   visit: (index: number, value: number) => void
 ): void {
   const slices = volume.slices;
@@ -176,7 +218,6 @@ function samplePlane(
   const depths = slices.map((s) => s.depthPositionMm);
   const orientation = orientationFromNormal(viewablePlane.normalXyz);
   const position = viewablePlane.positionXyz;
-  const outSpacing = outputSpacing(volume);
   const { widthPixels: outWidth, heightPixels: outHeight } = grid;
 
   if (orientation === 'axial') {
@@ -272,21 +313,143 @@ function samplePlane(
   }
 }
 
-export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane): RadioDensities | undefined {
+interface ObliqueGrid extends PlaneGrid {
+  uMin: number;
+  vMin: number;
+}
+
+// Smallest rectangle on the plane's axes (measured from the volume centre) covering the whole volume.
+function obliqueGrid(volume: Volume, plane: PlaneAxes, spacing: number): ObliqueGrid {
+  const { min, max } = getVolumeBounds(volume);
+  const centre = volumeCentre(volume);
+  let uMin = Infinity;
+  let uMax = -Infinity;
+  let vMin = Infinity;
+  let vMax = -Infinity;
+  for (const x of [min.x, max.x]) {
+    for (const y of [min.y, max.y]) {
+      for (const z of [min.z, max.z]) {
+        const relative = { x: x - centre.x, y: y - centre.y, z: z - centre.z };
+        const u = dot(relative, plane.rightXyz);
+        const v = dot(relative, plane.downXyz);
+        uMin = Math.min(uMin, u);
+        uMax = Math.max(uMax, u);
+        vMin = Math.min(vMin, v);
+        vMax = Math.max(vMax, v);
+      }
+    }
+  }
+  return {
+    widthPixels: Math.floor((uMax - uMin) / spacing) + 1,
+    heightPixels: Math.floor((vMax - vMin) / spacing) + 1,
+    uMin,
+    vMin,
+  };
+}
+
+// NaN outside the volume.
+function sampleTrilinear(slices: Slice[], width: number, height: number, fx: number, fy: number, fz: number): number {
+  const lastSlice = slices.length - 1;
+  if (
+    !(fx >= -EPSILON && fx <= width - 1 + EPSILON && fy >= -EPSILON && fy <= height - 1 + EPSILON) ||
+    !(fz >= -EPSILON && fz <= lastSlice + EPSILON)
+  ) {
+    return NaN;
+  }
+
+  const x0 = Math.min(width - 1, Math.max(0, Math.floor(fx)));
+  const y0 = Math.min(height - 1, Math.max(0, Math.floor(fy)));
+  const z0 = Math.min(lastSlice, Math.max(0, Math.floor(fz)));
+  const x1 = Math.min(width - 1, x0 + 1);
+  const y1 = Math.min(height - 1, y0 + 1);
+  const tx = Math.min(1, Math.max(0, fx - x0));
+  const ty = Math.min(1, Math.max(0, fy - y0));
+  const tz = Math.min(1, Math.max(0, fz - z0));
+  const b0 = y0 * width;
+  const b1 = y1 * width;
+
+  const near = bilinear(slices[z0].radiodensities, b0, b1, x0, x1, tx, ty);
+  if (tz === 0 || z0 === lastSlice) return near;
+  return near * (1 - tz) + bilinear(slices[z0 + 1].radiodensities, b0, b1, x0, x1, tx, ty) * tz;
+}
+
+// General path for rotated planes: each pixel is mapped to a 3D point and interpolated.
+function sampleObliquePlane(
+  volume: Volume,
+  plane: ViewablePlane,
+  grid: ObliqueGrid,
+  spacing: number,
+  visit: (index: number, value: number) => void
+): void {
+  const slices = volume.slices;
+  const { widthPixels: width, heightPixels: height, pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
+  const originX = slices[0].originXMm;
+  const originY = slices[0].originYMm;
+  const depths = slices.map((s) => s.depthPositionMm);
+  const lastSlice = depths.length - 1;
+  const depthStep = lastSlice > 0 ? (depths[lastSlice] - depths[0]) / lastSlice : 0;
+  const uniformDepths =
+    depthStep > 0 && depths.every((depth, i) => Math.abs(depth - (depths[0] + i * depthStep)) <= 1e-3 * depthStep);
+
+  const centre = volumeCentre(volume);
+  const n = plane.normalXyz;
+  const r = plane.rightXyz;
+  const d = plane.downXyz;
+  const p = plane.positionXyz;
+  const offset = dot({ x: p.x - centre.x, y: p.y - centre.y, z: p.z - centre.z }, n);
+
+  // Patient-space point of output pixel (0, 0).
+  const startX = centre.x + n.x * offset + r.x * grid.uMin + d.x * grid.vMin;
+  const startY = centre.y + n.y * offset + r.y * grid.uMin + d.y * grid.vMin;
+  const startZ = centre.z + n.z * offset + r.z * grid.uMin + d.z * grid.vMin;
+
+  for (let row = 0; row < grid.heightPixels; row++) {
+    let px = startX + d.x * spacing * row;
+    let py = startY + d.y * spacing * row;
+    let pz = startZ + d.z * spacing * row;
+    for (let col = 0; col < grid.widthPixels; col++) {
+      const fz = uniformDepths ? (pz - depths[0]) / depthStep : depthToSliceCoordinate(depths, pz);
+      visit(row * grid.widthPixels + col, sampleTrilinear(slices, width, height, (px - originX) / sx, (py - originY) / sy, fz));
+      px += r.x * spacing;
+      py += r.y * spacing;
+      pz += r.z * spacing;
+    }
+  }
+}
+
+interface PlaneSampling {
+  grid: PlaneGrid;
+  run: (plane: ViewablePlane, visit: (index: number, value: number) => void) => void;
+}
+
+// The grid is fixed for a given rotation, so slab sub-planes (shifted along the normal) reuse it.
+function createPlaneSampling(volume: Volume, plane: ViewablePlane, spacingScale: number): PlaneSampling {
+  const spacing = outputSpacing(volume) * spacingScale;
+  if (isAxisAligned(plane)) {
+    const grid = planeGrid(volume, orientationFromNormal(plane.normalXyz), spacing);
+    return { grid, run: (p, visit) => samplePlane(volume, p, grid, spacing, visit) };
+  }
+  const grid = obliqueGrid(volume, plane, spacing);
+  return {
+    grid: { widthPixels: grid.widthPixels, heightPixels: grid.heightPixels },
+    run: (p, visit) => sampleObliquePlane(volume, p, grid, spacing, visit),
+  };
+}
+
+export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane, spacingScale = 1): RadioDensities | undefined {
   const slices = volume.slices;
   if (slices.length === 0) return undefined;
 
-  const orientation = orientationFromNormal(viewablePlane.normalXyz);
-  if (orientation === 'axial') {
+  if (isAxisAligned(viewablePlane) && orientationFromNormal(viewablePlane.normalXyz) === 'axial') {
     const fz = depthToSliceCoordinate(slices.map((s) => s.depthPositionMm), viewablePlane.positionXyz.z);
     if (Number.isNaN(fz)) return undefined;
     const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
-    if (sx === sy && Math.abs(fz - Math.round(fz)) < EPSILON) return slices[Math.round(fz)];
+    if (spacingScale === 1 && sx === sy && Math.abs(fz - Math.round(fz)) < EPSILON) return slices[Math.round(fz)];
   }
 
-  const grid = planeGrid(volume, orientation);
+  const { grid, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
   const out = new Float32Array(grid.widthPixels * grid.heightPixels);
-  samplePlane(volume, viewablePlane, grid, (i, value) => {
+  run(viewablePlane, (i, value) => {
     out[i] = Number.isNaN(value) ? OUTSIDE_VOLUME_VALUE : value;
   });
   return { ...grid, radiodensities: out };
@@ -330,17 +493,19 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
   if (volume.slices.length === 0) return undefined;
 
   const maxSamples = slab.maxSamples ?? MAX_SLAB_SAMPLES;
+  const spacingScale = slab.spacingScale ?? 1;
   const orientation = orientationFromNormal(viewablePlane.normalXyz);
+  const aligned = isAxisAligned(viewablePlane);
   const sampleCount = slabSampleCount(volume, orientation, slab.thicknessMm, maxSamples);
-  if (sampleCount <= 1) return sampleCrossSection(volume, viewablePlane);
+  if (sampleCount <= 1) return sampleCrossSection(volume, viewablePlane, spacingScale);
 
   const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = volume.slices[0];
-  if (orientation === 'axial' && sx === sy) {
+  if (aligned && orientation === 'axial' && sx === sy && spacingScale === 1) {
     const direct = sampleAxialSlabFromSlices(volume.slices, viewablePlane.positionXyz.z, slab, maxSamples);
     if (direct) return direct;
   }
 
-  const grid = planeGrid(volume, orientation);
+  const { grid, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
   const size = grid.widthPixels * grid.heightPixels;
   const initial = slab.mode === 'max' ? -Infinity : slab.mode === 'min' ? Infinity : 0;
   const accumulated = new Float64Array(size).fill(initial);
@@ -368,7 +533,7 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
   const step = slab.thicknessMm / (sampleCount - 1);
   for (let k = 0; k < sampleCount; k++) {
     const shifted = moveViewablePlaneForward(viewablePlane, -slab.thicknessMm / 2 + k * step);
-    samplePlane(volume, shifted, grid, visit);
+    run(shifted, visit);
   }
 
   const out = new Float32Array(size);

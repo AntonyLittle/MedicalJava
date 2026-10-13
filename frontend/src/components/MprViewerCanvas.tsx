@@ -3,12 +3,15 @@ import type { RadioDensities, Volume } from '../api/types';
 import { CanvasRenderer } from './CanvasRenderer';
 import { useWheelDistanceScroll } from '../hooks/useWheelDistanceScroll';
 import { useViewerInteractions } from '../hooks/useViewerInteractions';
-import type { ViewablePlane } from '../utils/canvasMath';
+import { useRotateDrag } from '../hooks/useRotateDrag';
+import { IDENTITY_ROTATION, type Quaternion, type ViewablePlane } from '../utils/canvasMath';
 
 export interface MprViewerCanvasProps {
   volume: Volume;
   viewablePlane: ViewablePlane;
   onViewablePlaneChange: (viewablePlane: ViewablePlane) => void;
+  mprRotation: Quaternion;
+  onMprRotationChange: (rotation: Quaternion) => void;
   windowLevel: number;
   windowWidth: number;
   onWindowLevelChange: (level: number) => void;
@@ -20,6 +23,8 @@ export function MprViewerCanvas({
   volume,
   viewablePlane,
   onViewablePlaneChange,
+  mprRotation,
+  onMprRotationChange,
   windowLevel,
   windowWidth,
   onWindowLevelChange,
@@ -27,11 +32,13 @@ export function MprViewerCanvas({
 }: MprViewerCanvasProps & { radioDensities: RadioDensities | undefined }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  const startRotate = useRotateDrag(viewablePlane, mprRotation, onMprRotationChange);
   const { viewTransform, handlePointerEvent } = useViewerInteractions({
     windowLevel,
     windowWidth,
     onWindowLevelChange,
     onWindowWidthChange,
+    startRotate,
   });
   useWheelDistanceScroll(canvasRef, viewablePlane, volume, onViewablePlaneChange);
 
@@ -47,6 +54,7 @@ export function MprViewerCanvas({
       onPointerDown={handlePointerEvent}
       onPointerMove={handlePointerEvent}
       onPointerUp={handlePointerEvent}
+      onDoubleClick={() => onMprRotationChange(IDENTITY_ROTATION)}
     />
   );
 }

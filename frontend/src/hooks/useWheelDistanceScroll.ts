@@ -40,10 +40,7 @@ export function useWheelDistanceScroll(
       const { min, max } = boundsRef.current;
 
       wheelAccumRef.current = remainder;
-      onViewablePlaneChangeRef.current({
-        positionXyz: clampToBounds(moved.positionXyz, min, max),
-        normalXyz: { ...moved.normalXyz }
-      });
+      onViewablePlaneChangeRef.current({ ...moved, positionXyz: clampToBounds(moved.positionXyz, min, max) });
     }
 
     canvas.addEventListener('wheel', handleWheel, { passive: false });

@@ -1,13 +1,23 @@
-import { useMemo } from 'react';
+import { useCallback } from 'react';
 import type { RadioDensities, Volume } from '../api/types';
 import type { ViewablePlane } from '../utils/canvasMath';
-import { planeFromOrientation, planeOrientationAndOffset, sampleCrossSection } from '../utils/mprSampler';
+import { isAxisAligned, planeFromParams, PREVIEW_SPACING_SCALE, sampleCrossSection } from '../utils/mprSampler';
+import { usePlaneParams } from './usePlaneParams';
+import { useProgressiveValue } from './useProgressiveValue';
 
+// Rotated planes show a coarser result first, then full quality once the plane stops changing.
 export function useThinMprRadioDensities(volume: Volume, viewablePlane: ViewablePlane): RadioDensities | undefined {
-  const { orientation, offsetMm } = planeOrientationAndOffset(viewablePlane);
+  const params = usePlaneParams(volume, viewablePlane);
+  const oblique = !isAxisAligned(params);
 
-  return useMemo(
-    () => sampleCrossSection(volume, planeFromOrientation(orientation, offsetMm)),
-    [volume, orientation, offsetMm]
+  const computePreview = useCallback(
+    () => sampleCrossSection(volume, planeFromParams(volume, params), oblique ? PREVIEW_SPACING_SCALE : 1),
+    [volume, params, oblique]
   );
+  const computeFull = useCallback(
+    () => sampleCrossSection(volume, planeFromParams(volume, params)),
+    [volume, params]
+  );
+
+  return useProgressiveValue(computePreview, computeFull, oblique);
 }

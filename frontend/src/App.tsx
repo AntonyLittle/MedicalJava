@@ -1,7 +1,7 @@
 import { useDeferredValue, useEffect, useMemo, useState } from 'react';
-import type { Coordinate, ViewablePlane } from './utils/canvasMath';
-import { getVolumeBounds, NORMAL_BY_ORIENTATION, type PlaneOrientation, type ProjectionMode } from './utils/mprSampler';
-import { Alert, Box, CircularProgress, Container, Typography } from '@mui/material';
+import { buildMprPlanes, IDENTITY_ROTATION, type Coordinate, type Quaternion, type ViewablePlane } from './utils/canvasMath';
+import { getVolumeBounds, type ProjectionMode } from './utils/mprSampler';
+import { Alert, Box, Button, CircularProgress, Container, Typography } from '@mui/material';
 import { fetchPatients, fetchVolume, fetchVolumes } from './api/client';
 import type { Patient, Volume } from './api/types';
 import { HierarchySelector } from './components/HierarchySelector';
@@ -26,9 +26,12 @@ function App() {
   const [sliceIndex, setSliceIndex] = useState(0);
 
   const [mprPosition, setMprPosition] = useState<Coordinate>({ x: 0, y: 0, z: 0 });
-  const axialPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: NORMAL_BY_ORIENTATION.axial }), [mprPosition]);
-  const coronalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: NORMAL_BY_ORIENTATION.coronal }), [mprPosition]);
-  const sagittalPlane = useMemo<ViewablePlane>(() => ({ positionXyz: mprPosition, normalXyz: NORMAL_BY_ORIENTATION.sagittal }), [mprPosition]);
+  const [mprRotation, setMprRotation] = useState<Quaternion>(IDENTITY_ROTATION);
+  const {
+    axial: axialPlane,
+    coronal: coronalPlane,
+    sagittal: sagittalPlane,
+  } = useMemo(() => buildMprPlanes(mprPosition, mprRotation), [mprPosition, mprRotation]);
   const handleMprPlaneChange = (plane: ViewablePlane) => setMprPosition(plane.positionXyz);
 
   const [slabThicknessMm, setSlabThicknessMm] = useState(DEFAULT_SLAB_THICKNESS_MM);
@@ -66,6 +69,7 @@ function App() {
     fetchVolume(selectedPatientId, selectedVolumeId)
       .then((v) => {
         setVolume(v);
+        setMprRotation(IDENTITY_ROTATION);
         if (v.slices.length > 0) {
           const { min, max } = getVolumeBounds(v);
           setMprPosition({ x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 });
@@ -115,6 +119,8 @@ function App() {
               <ThinMprVolumeViewer
                 volume={volume}
                 viewablePlane={axialPlane}
+                mprRotation={mprRotation}
+                onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
@@ -124,6 +130,8 @@ function App() {
               <ThickMprVolumeViewer
                 volume={volume}
                 viewablePlane={axialPlane}
+                mprRotation={mprRotation}
+                onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
@@ -135,6 +143,8 @@ function App() {
               <ThinMprVolumeViewer
                 volume={volume}
                 viewablePlane={coronalPlane}
+                mprRotation={mprRotation}
+                onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
@@ -144,6 +154,8 @@ function App() {
               <ThickMprVolumeViewer
                 volume={volume}
                 viewablePlane={coronalPlane}
+                mprRotation={mprRotation}
+                onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
@@ -155,6 +167,8 @@ function App() {
               <ThinMprVolumeViewer
                 volume={volume}
                 viewablePlane={sagittalPlane}
+                mprRotation={mprRotation}
+                onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
@@ -164,6 +178,8 @@ function App() {
               <ThickMprVolumeViewer
                 volume={volume}
                 viewablePlane={sagittalPlane}
+                mprRotation={mprRotation}
+                onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
                 windowLevel={windowLevel}
                 windowWidth={windowWidth}
@@ -191,6 +207,9 @@ function App() {
               onProjectionModeChange={setProjectionMode}
             />
             <Typography>MPR Position: {mprPosition.x.toFixed(1)}, {mprPosition.y.toFixed(1)}, {mprPosition.z.toFixed(1)}</Typography>
+            <Button size="small" onClick={() => setMprRotation(IDENTITY_ROTATION)}>
+              Reset rotation
+            </Button>
           </>
         )}
       </Box>

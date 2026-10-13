@@ -9,6 +9,7 @@ const WINDOW_WIDTH_PER_PIXEL = 4;
 const ZOOM_EXPONENT_PER_PIXEL = 0.01;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 16;
+const ROTATION_RAD_PER_PIXEL = (0.5 * Math.PI) / 180;
 
 // Wheel sensitivity: deltaY units (varies by device) per slice step.
 const WHEEL_DELTA_PER_SLICE = 50;
@@ -28,10 +29,84 @@ export type Coordinate = {
   z: number
 };
 
+// rightXyz/downXyz are the unit in-plane axes of the displayed image (columns increase along right, rows along down).
 export type ViewablePlane = {
   positionXyz: Coordinate;
   normalXyz: Coordinate;
+  rightXyz: Coordinate;
+  downXyz: Coordinate;
 };
+
+export type Quaternion = { x: number; y: number; z: number; w: number };
+
+export const IDENTITY_ROTATION: Quaternion = { x: 0, y: 0, z: 0, w: 1 };
+
+export function crossProduct(a: Coordinate, b: Coordinate): Coordinate {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+
+export function quaternionFromAxisAngle(axis: Coordinate, angleRad: number): Quaternion {
+  const s = Math.sin(angleRad / 2);
+  return { x: axis.x * s, y: axis.y * s, z: axis.z * s, w: Math.cos(angleRad / 2) };
+}
+
+// Applies b first, then a.
+export function multiplyQuaternions(a: Quaternion, b: Quaternion): Quaternion {
+  return {
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+  };
+}
+
+export function normalizeQuaternion(q: Quaternion): Quaternion {
+  const length = Math.hypot(q.x, q.y, q.z, q.w);
+  return { x: q.x / length, y: q.y / length, z: q.z / length, w: q.w / length };
+}
+
+export function rotateVector(q: Quaternion, v: Coordinate): Coordinate {
+  const tx = 2 * (q.y * v.z - q.z * v.y);
+  const ty = 2 * (q.z * v.x - q.x * v.z);
+  const tz = 2 * (q.x * v.y - q.y * v.x);
+  return {
+    x: v.x + q.w * tx + (q.y * tz - q.z * ty),
+    y: v.y + q.w * ty + (q.z * tx - q.x * tz),
+    z: v.z + q.w * tz + (q.x * ty - q.y * tx),
+  };
+}
+
+export interface MprPlanes {
+  axial: ViewablePlane;
+  coronal: ViewablePlane;
+  sagittal: ViewablePlane;
+}
+
+// The three planes share one point and stay mutually perpendicular; identity gives the standard orthogonal views.
+export function buildMprPlanes(position: Coordinate, rotation: Quaternion): MprPlanes {
+  const ex = rotateVector(rotation, { x: 1, y: 0, z: 0 });
+  const ey = rotateVector(rotation, { x: 0, y: 1, z: 0 });
+  const ez = rotateVector(rotation, { x: 0, y: 0, z: 1 });
+  const negEz = { x: -ez.x, y: -ez.y, z: -ez.z };
+
+  return {
+    axial: { positionXyz: position, normalXyz: ez, rightXyz: ex, downXyz: ey },
+    coronal: { positionXyz: position, normalXyz: ey, rightXyz: ex, downXyz: negEz },
+    sagittal: { positionXyz: position, normalXyz: ex, rightXyz: ey, downXyz: negEz },
+  };
+}
+
+// Drag right rotates the displayed image clockwise; the axis is right x down so this holds for every view.
+export function computeRotationFromDrag(
+  start: Quaternion,
+  viewablePlane: ViewablePlane,
+  startX: number,
+  clientX: number
+): Quaternion {
+  const axis = crossProduct(viewablePlane.rightXyz, viewablePlane.downXyz);
+  const angle = -(clientX - startX) * ROTATION_RAD_PER_PIXEL;
+  return normalizeQuaternion(multiplyQuaternions(quaternionFromAxisAngle(axis, angle), start));
+}
 
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -53,6 +128,8 @@ export function moveViewablePlaneForward(viewablePlane: ViewablePlane, distanceM
       z: viewablePlane.positionXyz.z + (viewablePlane.normalXyz.z * distanceMm),
     },
     normalXyz: { ...viewablePlane.normalXyz },
+    rightXyz: { ...viewablePlane.rightXyz },
+    downXyz: { ...viewablePlane.downXyz },
   };
 }
 

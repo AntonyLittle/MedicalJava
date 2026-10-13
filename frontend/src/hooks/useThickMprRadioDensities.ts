@@ -1,54 +1,46 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback } from 'react';
 import type { RadioDensities, Volume } from '../api/types';
 import type { ViewablePlane } from '../utils/canvasMath';
 import {
-  planeFromOrientation,
-  planeOrientationAndOffset,
+  isAxisAligned,
+  orientationFromNormal,
+  planeFromParams,
   PREVIEW_SLAB_SAMPLES,
+  PREVIEW_SPACING_SCALE,
   sampleSlab,
   slabSampleCount,
   type ProjectionMode,
 } from '../utils/mprSampler';
+import { usePlaneParams } from './usePlaneParams';
+import { useProgressiveValue } from './useProgressiveValue';
 
-const REFINE_DELAY_MS = 150;
-
-interface RefinedResult {
-  volume: Volume;
-  key: string;
-  value: RadioDensities | undefined;
-}
-
-// Returns a cheap low-sample result immediately, then the full-quality one once the inputs stop changing.
+// Returns a cheap low-quality result immediately, then the full-quality one once the inputs stop changing.
 export function useThickMprRadioDensities(
   volume: Volume,
   viewablePlane: ViewablePlane,
   thicknessMm: number,
   mode: ProjectionMode
 ): RadioDensities | undefined {
-  const { orientation, offsetMm } = planeOrientationAndOffset(viewablePlane);
-  const key = `${orientation}|${offsetMm}|${thicknessMm}|${mode}`;
+  const params = usePlaneParams(volume, viewablePlane);
+  const oblique = !isAxisAligned(params);
   const needsRefinement =
-    volume.slices.length > 0 && slabSampleCount(volume, orientation, thicknessMm) > PREVIEW_SLAB_SAMPLES;
+    volume.slices.length > 0 &&
+    (oblique || slabSampleCount(volume, orientationFromNormal(params.normalXyz), thicknessMm) > PREVIEW_SLAB_SAMPLES);
 
-  const preview = useMemo(
+  const computePreview = useCallback(
     () =>
-      sampleSlab(volume, planeFromOrientation(orientation, offsetMm), {
+      sampleSlab(volume, planeFromParams(volume, params), {
         thicknessMm,
         mode,
         maxSamples: PREVIEW_SLAB_SAMPLES,
+        spacingScale: oblique ? PREVIEW_SPACING_SCALE : 1,
       }),
-    [volume, orientation, offsetMm, thicknessMm, mode]
+    [volume, params, thicknessMm, mode, oblique]
+  );
+  const computeFull = useCallback(
+    () => sampleSlab(volume, planeFromParams(volume, params), { thicknessMm, mode }),
+    [volume, params, thicknessMm, mode]
   );
 
-  const [refined, setRefined] = useState<RefinedResult>();
-  useEffect(() => {
-    if (!needsRefinement) return;
-    const timer = setTimeout(() => {
-      const value = sampleSlab(volume, planeFromOrientation(orientation, offsetMm), { thicknessMm, mode });
-      setRefined({ volume, key, value });
-    }, REFINE_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [needsRefinement, volume, key, orientation, offsetMm, thicknessMm, mode]);
-
-  return needsRefinement && refined?.volume === volume && refined.key === key ? refined.value : preview;
+  return useProgressiveValue(computePreview, computeFull, needsRefinement);
 }

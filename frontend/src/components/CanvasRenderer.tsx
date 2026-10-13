@@ -14,6 +14,7 @@ interface CanvasRendererProps {
   onPointerDown?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerMove?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerUp?: (e: PointerEvent<HTMLCanvasElement>) => void;
+  onDoubleClick?: () => void;
 }
 
 // Maps a Hounsfield Unit value to a 0-255 grayscale value via window level/width.
@@ -29,7 +30,7 @@ function voxelToGray(hu: number, windowLevel: number, windowWidth: number): numb
 }
 
 export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>(function CanvasRenderer(
-  { width, height, radioDensities, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp },
+  { width, height, radioDensities, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onDoubleClick },
   forwardedRef
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -101,6 +102,11 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
       ref={setCanvasRef}
       style={{ maxWidth: '100%', backgroundColor: '#000', touchAction: 'none' }}
       onContextMenu={(e) => e.preventDefault()}
+      // Stops the browser's middle-click autoscroll/paste so the middle button can drag.
+      onMouseDown={(e) => {
+        if (e.button === 1) e.preventDefault();
+      }}
+      onDoubleClick={onDoubleClick}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
