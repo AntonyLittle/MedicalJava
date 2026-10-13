@@ -10,6 +10,7 @@ import { WindowLevelControls } from './components/WindowLevelControls';
 import { ThinMprVolumeViewer } from './components/ThinMprVolumeViewer';
 import { ThickMprVolumeViewer } from './components/ThickMprVolumeViewer';
 import { ThickMprControls } from './components/ThickMprControls';
+import { MprOverviewViewer } from './components/MprOverviewViewer';
 
 const DEFAULT_WINDOW_LEVEL = 1000;
 const DEFAULT_WINDOW_WIDTH = 2000;
@@ -27,11 +28,8 @@ function App() {
 
   const [mprPosition, setMprPosition] = useState<Coordinate>({ x: 0, y: 0, z: 0 });
   const [mprRotation, setMprRotation] = useState<Quaternion>(IDENTITY_ROTATION);
-  const {
-    axial: axialPlane,
-    coronal: coronalPlane,
-    sagittal: sagittalPlane,
-  } = useMemo(() => buildMprPlanes(mprPosition, mprRotation), [mprPosition, mprRotation]);
+  const mprPlanes = useMemo(() => buildMprPlanes(mprPosition, mprRotation), [mprPosition, mprRotation]);
+  const { axial: axialPlane, coronal: coronalPlane, sagittal: sagittalPlane } = mprPlanes;
   const handleMprPlaneChange = (plane: ViewablePlane) => setMprPosition(plane.positionXyz);
 
   const [slabThicknessMm, setSlabThicknessMm] = useState(DEFAULT_SLAB_THICKNESS_MM);
@@ -114,10 +112,20 @@ function App() {
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
               />
+              <MprOverviewViewer
+                volume={volume}
+                planes={mprPlanes}
+                projectionMode={projectionMode}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+              />
             </Box>
             <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2 }}>
               <ThinMprVolumeViewer
                 volume={volume}
+                orientation="axial"
                 viewablePlane={axialPlane}
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
@@ -129,6 +137,7 @@ function App() {
               />
               <ThickMprVolumeViewer
                 volume={volume}
+                orientation="axial"
                 viewablePlane={axialPlane}
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
@@ -142,6 +151,7 @@ function App() {
               />
               <ThinMprVolumeViewer
                 volume={volume}
+                orientation="coronal"
                 viewablePlane={coronalPlane}
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
@@ -153,6 +163,7 @@ function App() {
               />
               <ThickMprVolumeViewer
                 volume={volume}
+                orientation="coronal"
                 viewablePlane={coronalPlane}
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
@@ -166,6 +177,7 @@ function App() {
               />
               <ThinMprVolumeViewer
                 volume={volume}
+                orientation="sagittal"
                 viewablePlane={sagittalPlane}
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
@@ -177,6 +189,7 @@ function App() {
               />
               <ThickMprVolumeViewer
                 volume={volume}
+                orientation="sagittal"
                 viewablePlane={sagittalPlane}
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}

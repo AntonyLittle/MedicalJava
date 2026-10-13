@@ -1,8 +1,14 @@
 import { forwardRef, useCallback, useEffect, useRef } from 'react';
 import type { PointerEvent } from 'react';
 import type { RadioDensities } from '../api/types';
-import { IDENTITY_VIEW_TRANSFORM, type ViewTransform } from '../utils/canvasMath';
+import { IDENTITY_VIEW_TRANSFORM, sourceToCanvas, type ViewTransform } from '../utils/canvasMath';
 import { mergeRefs } from '../utils/mergeRefs';
+
+// project() maps image pixel coordinates of the radioDensities to canvas coordinates, including pan and zoom.
+export type OverlayDrawer = (
+  context: CanvasRenderingContext2D,
+  project: (imageX: number, imageY: number) => { x: number; y: number }
+) => void;
 
 interface CanvasRendererProps {
   width: number;
@@ -15,6 +21,8 @@ interface CanvasRendererProps {
   onPointerMove?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerUp?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onDoubleClick?: () => void;
+  borderColor?: string;
+  drawOverlay?: OverlayDrawer;
 }
 
 // Maps a Hounsfield Unit value to a 0-255 grayscale value via window level/width.
@@ -30,7 +38,7 @@ function voxelToGray(hu: number, windowLevel: number, windowWidth: number): numb
 }
 
 export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>(function CanvasRenderer(
-  { width, height, radioDensities, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onDoubleClick },
+  { width, height, radioDensities, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onDoubleClick, borderColor, drawOverlay },
   forwardedRef
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -51,7 +59,11 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
 
     blitAndScaleRadiodensities(radioDensities.radiodensities, radioDensities.widthPixels, radioDensities.heightPixels, context, width, height);
 
-  }, [radioDensities, windowLevel, windowWidth, viewTransform, width, height]);
+    drawOverlay?.(context, (imageX, imageY) =>
+      sourceToCanvas(imageX, imageY, radioDensities.widthPixels, radioDensities.heightPixels, width, height, viewTransform)
+    );
+
+  }, [radioDensities, windowLevel, windowWidth, viewTransform, drawOverlay, width, height]);
 
   function blitAndScaleRadiodensities(
     radiodensities: ArrayLike<number>,
@@ -100,7 +112,12 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
   return (
     <canvas
       ref={setCanvasRef}
-      style={{ maxWidth: '100%', backgroundColor: '#000', touchAction: 'none' }}
+      style={{
+        maxWidth: '100%',
+        backgroundColor: '#000',
+        touchAction: 'none',
+        ...(borderColor && { border: `3px solid ${borderColor}`, boxSizing: 'border-box' }),
+      }}
       onContextMenu={(e) => e.preventDefault()}
       // Stops the browser's middle-click autoscroll/paste so the middle button can drag.
       onMouseDown={(e) => {

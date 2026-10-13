@@ -96,16 +96,48 @@ export function buildMprPlanes(position: Coordinate, rotation: Quaternion): MprP
   };
 }
 
-// Drag right rotates the displayed image clockwise; the axis is right x down so this holds for every view.
+// Drag down rolls the near side of the volume down; the plane tilts about its own image x axis.
 export function computeRotationFromDrag(
   start: Quaternion,
   viewablePlane: ViewablePlane,
-  startX: number,
-  clientX: number
+  startY: number,
+  clientY: number
 ): Quaternion {
-  const axis = crossProduct(viewablePlane.rightXyz, viewablePlane.downXyz);
-  const angle = -(clientX - startX) * ROTATION_RAD_PER_PIXEL;
-  return normalizeQuaternion(multiplyQuaternions(quaternionFromAxisAngle(axis, angle), start));
+  const angle = -(clientY - startY) * ROTATION_RAD_PER_PIXEL;
+  return normalizeQuaternion(multiplyQuaternions(quaternionFromAxisAngle(viewablePlane.rightXyz, angle), start));
+}
+
+// Free camera for views not tied to the shared MPR frame: vertical drag pitches, horizontal drag yaws.
+export function computeCameraRotationFromDrag(
+  start: Quaternion,
+  viewablePlane: ViewablePlane,
+  startX: number,
+  startY: number,
+  clientX: number,
+  clientY: number
+): Quaternion {
+  const pitch = quaternionFromAxisAngle(viewablePlane.rightXyz, -(clientY - startY) * ROTATION_RAD_PER_PIXEL);
+  const yaw = quaternionFromAxisAngle(viewablePlane.downXyz, (clientX - startX) * ROTATION_RAD_PER_PIXEL);
+  return normalizeQuaternion(multiplyQuaternions(yaw, multiplyQuaternions(pitch, start)));
+}
+
+// Inverse of CanvasRenderer's pixel mapping; returns the canvas position of the centre of a source pixel.
+export function sourceToCanvas(
+  sourceX: number,
+  sourceY: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  viewTransform: ViewTransform
+): { x: number; y: number } {
+  const scale = Math.max(sourceWidth / canvasWidth, sourceHeight / canvasHeight);
+  const unzoomedX = (sourceX + 0.5) / scale;
+  const unzoomedY = (sourceY + 0.5) / scale;
+  return {
+    x: (unzoomedX - canvasWidth / 2) * viewTransform.zoom + canvasWidth / 2 + viewTransform.panX,
+    y: (unzoomedY - canvasHeight / 2) * viewTransform.zoom + canvasHeight / 2 + viewTransform.panY,
+  };
 }
 
 export function clamp(value: number, min: number, max: number): number {

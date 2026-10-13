@@ -5,9 +5,12 @@ import { useWheelDistanceScroll } from '../hooks/useWheelDistanceScroll';
 import { useViewerInteractions } from '../hooks/useViewerInteractions';
 import { useRotateDrag } from '../hooks/useRotateDrag';
 import { IDENTITY_ROTATION, type Quaternion, type ViewablePlane } from '../utils/canvasMath';
+import { MPR_COLOR_BY_ORIENTATION } from '../utils/mprColors';
+import type { PlaneOrientation } from '../utils/mprSampler';
 
 export interface MprViewerCanvasProps {
   volume: Volume;
+  orientation: PlaneOrientation;
   viewablePlane: ViewablePlane;
   onViewablePlaneChange: (viewablePlane: ViewablePlane) => void;
   mprRotation: Quaternion;
@@ -21,6 +24,7 @@ export interface MprViewerCanvasProps {
 export function MprViewerCanvas({
   radioDensities,
   volume,
+  orientation,
   viewablePlane,
   onViewablePlaneChange,
   mprRotation,
@@ -51,6 +55,7 @@ export function MprViewerCanvas({
       windowLevel={windowLevel}
       windowWidth={windowWidth}
       viewTransform={viewTransform}
+      borderColor={MPR_COLOR_BY_ORIENTATION[orientation]}
       onPointerDown={handlePointerEvent}
       onPointerMove={handlePointerEvent}
       onPointerUp={handlePointerEvent}

@@ -9,10 +9,10 @@ export function useRotateDrag(
   onRotationChange: (rotation: Quaternion) => void
 ): DragStarter {
   return useCallback<DragStarter>(
-    (startX) => {
+    (_startX, startY) => {
       const startRotation = rotation;
       const startPlane = viewablePlane;
-      return (clientX) => onRotationChange(computeRotationFromDrag(startRotation, startPlane, startX, clientX));
+      return (_clientX, clientY) => onRotationChange(computeRotationFromDrag(startRotation, startPlane, startY, clientY));
     },
     [viewablePlane, rotation, onRotationChange]
   );

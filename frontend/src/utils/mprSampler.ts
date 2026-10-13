@@ -1,4 +1,4 @@
-import type { RadioDensities, Slice, Volume } from '../api/types';
+import type { ImageGeometry, RadioDensities, Slice, Volume } from '../api/types';
 import { moveViewablePlaneForward, type Coordinate, type ViewablePlane } from './canvasMath';
 
 export type PlaneOrientation = 'axial' | 'coronal' | 'sagittal';
@@ -134,7 +134,7 @@ function dot(a: Coordinate, b: Coordinate): number {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
-function volumeCentre(volume: Volume): Coordinate {
+export function volumeCentre(volume: Volume): Coordinate {
   if (volume.slices.length === 0) return { x: 0, y: 0, z: 0 };
   const { min, max } = getVolumeBounds(volume);
   return { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
@@ -318,33 +318,66 @@ interface ObliqueGrid extends PlaneGrid {
   vMin: number;
 }
 
-// Smallest rectangle on the plane's axes (measured from the volume centre) covering the whole volume.
-function obliqueGrid(volume: Volume, plane: PlaneAxes, spacing: number): ObliqueGrid {
+// Corner index bits: 1 = x, 2 = y, 4 = z (set bit means the max side).
+export function volumeCorners(volume: Volume): Coordinate[] {
   const { min, max } = getVolumeBounds(volume);
+  return Array.from({ length: 8 }, (_, i) => ({
+    x: i & 1 ? max.x : min.x,
+    y: i & 2 ? max.y : min.y,
+    z: i & 4 ? max.z : min.z,
+  }));
+}
+
+// Bounding rectangle of the volume's corners on the plane's axes, measured from the volume centre.
+function projectedExtent(volume: Volume, plane: PlaneAxes): { uMin: number; uMax: number; vMin: number; vMax: number } {
   const centre = volumeCentre(volume);
   let uMin = Infinity;
   let uMax = -Infinity;
   let vMin = Infinity;
   let vMax = -Infinity;
-  for (const x of [min.x, max.x]) {
-    for (const y of [min.y, max.y]) {
-      for (const z of [min.z, max.z]) {
-        const relative = { x: x - centre.x, y: y - centre.y, z: z - centre.z };
-        const u = dot(relative, plane.rightXyz);
-        const v = dot(relative, plane.downXyz);
-        uMin = Math.min(uMin, u);
-        uMax = Math.max(uMax, u);
-        vMin = Math.min(vMin, v);
-        vMax = Math.max(vMax, v);
-      }
-    }
+  for (const corner of volumeCorners(volume)) {
+    const relative = { x: corner.x - centre.x, y: corner.y - centre.y, z: corner.z - centre.z };
+    const u = dot(relative, plane.rightXyz);
+    const v = dot(relative, plane.downXyz);
+    uMin = Math.min(uMin, u);
+    uMax = Math.max(uMax, u);
+    vMin = Math.min(vMin, v);
+    vMax = Math.max(vMax, v);
   }
+  return { uMin, uMax, vMin, vMax };
+}
+
+function obliqueGrid(volume: Volume, plane: PlaneAxes, spacing: number): ObliqueGrid {
+  const { uMin, uMax, vMin, vMax } = projectedExtent(volume, plane);
   return {
     widthPixels: Math.floor((uMax - uMin) / spacing) + 1,
     heightPixels: Math.floor((vMax - vMin) / spacing) + 1,
     uMin,
     vMin,
   };
+}
+
+export function planeImageGeometry(volume: Volume, plane: PlaneAxes, spacingMm: number): ImageGeometry {
+  const { uMin, vMin } = projectedExtent(volume, plane);
+  return { uMinMm: uMin, vMinMm: vMin, spacingMm };
+}
+
+// Thickness of a slab centred on the volume that contains every voxel along the given normal.
+export function fullVolumeThicknessMm(volume: Volume, normal: Coordinate): number {
+  const centre = volumeCentre(volume);
+  let halfExtent = 0;
+  for (const corner of volumeCorners(volume)) {
+    const relative = { x: corner.x - centre.x, y: corner.y - centre.y, z: corner.z - centre.z };
+    halfExtent = Math.max(halfExtent, Math.abs(dot(relative, normal)));
+  }
+  return halfExtent * 2;
+}
+
+// Spacing multiplier that keeps the longest side of the plane's image under maxPixels.
+export function fitSpacingScale(volume: Volume, plane: PlaneAxes, maxPixels: number): number {
+  const { uMin, uMax, vMin, vMax } = projectedExtent(volume, plane);
+  const extentMm = Math.max(uMax - uMin, vMax - vMin);
+  return Math.max(1, extentMm / (maxPixels * outputSpacing(volume)));
 }
 
 // NaN outside the volume.
@@ -419,6 +452,7 @@ function sampleObliquePlane(
 
 interface PlaneSampling {
   grid: PlaneGrid;
+  spacing: number;
   run: (plane: ViewablePlane, visit: (index: number, value: number) => void) => void;
 }
 
@@ -427,11 +461,12 @@ function createPlaneSampling(volume: Volume, plane: ViewablePlane, spacingScale:
   const spacing = outputSpacing(volume) * spacingScale;
   if (isAxisAligned(plane)) {
     const grid = planeGrid(volume, orientationFromNormal(plane.normalXyz), spacing);
-    return { grid, run: (p, visit) => samplePlane(volume, p, grid, spacing, visit) };
+    return { grid, spacing, run: (p, visit) => samplePlane(volume, p, grid, spacing, visit) };
   }
   const grid = obliqueGrid(volume, plane, spacing);
   return {
     grid: { widthPixels: grid.widthPixels, heightPixels: grid.heightPixels },
+    spacing,
     run: (p, visit) => sampleObliquePlane(volume, p, grid, spacing, visit),
   };
 }
@@ -444,15 +479,23 @@ export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane,
     const fz = depthToSliceCoordinate(slices.map((s) => s.depthPositionMm), viewablePlane.positionXyz.z);
     if (Number.isNaN(fz)) return undefined;
     const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
-    if (spacingScale === 1 && sx === sy && Math.abs(fz - Math.round(fz)) < EPSILON) return slices[Math.round(fz)];
+    if (spacingScale === 1 && sx === sy && Math.abs(fz - Math.round(fz)) < EPSILON) {
+      const slice = slices[Math.round(fz)];
+      return {
+        widthPixels: slice.widthPixels,
+        heightPixels: slice.heightPixels,
+        radiodensities: slice.radiodensities,
+        geometry: planeImageGeometry(volume, viewablePlane, sx),
+      };
+    }
   }
 
-  const { grid, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
+  const { grid, spacing, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
   const out = new Float32Array(grid.widthPixels * grid.heightPixels);
   run(viewablePlane, (i, value) => {
     out[i] = Number.isNaN(value) ? OUTSIDE_VOLUME_VALUE : value;
   });
-  return { ...grid, radiodensities: out };
+  return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacing) };
 }
 
 // Axial slabs on square voxels need no interpolation: combine the stored slices inside the slab directly.
@@ -460,7 +503,8 @@ function sampleAxialSlabFromSlices(
   slices: Slice[],
   centreZ: number,
   slab: SlabOptions,
-  maxSamples: number
+  maxSamples: number,
+  geometry: ImageGeometry
 ): RadioDensities | undefined {
   const half = slab.thicknessMm / 2;
   const inside = slices.filter((s) => Math.abs(s.depthPositionMm - centreZ) <= half + EPSILON);
@@ -485,7 +529,7 @@ function sampleAxialSlabFromSlices(
   }
   if (slab.mode === 'average') for (let i = 0; i < size; i++) accumulated[i] /= used;
 
-  return { widthPixels, heightPixels, radiodensities: accumulated };
+  return { widthPixels, heightPixels, radiodensities: accumulated, geometry };
 }
 
 // Projects a slab centred on the plane; samples outside the volume are ignored.
@@ -501,11 +545,17 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
 
   const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = volume.slices[0];
   if (aligned && orientation === 'axial' && sx === sy && spacingScale === 1) {
-    const direct = sampleAxialSlabFromSlices(volume.slices, viewablePlane.positionXyz.z, slab, maxSamples);
+    const direct = sampleAxialSlabFromSlices(
+      volume.slices,
+      viewablePlane.positionXyz.z,
+      slab,
+      maxSamples,
+      planeImageGeometry(volume, viewablePlane, sx)
+    );
     if (direct) return direct;
   }
 
-  const { grid, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
+  const { grid, spacing, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
   const size = grid.widthPixels * grid.heightPixels;
   const initial = slab.mode === 'max' ? -Infinity : slab.mode === 'min' ? Infinity : 0;
   const accumulated = new Float64Array(size).fill(initial);
@@ -541,5 +591,5 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
     if (counts[i] === 0) out[i] = OUTSIDE_VOLUME_VALUE;
     else out[i] = slab.mode === 'average' ? accumulated[i] / counts[i] : accumulated[i];
   }
-  return { ...grid, radiodensities: out };
+  return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacing) };
 }

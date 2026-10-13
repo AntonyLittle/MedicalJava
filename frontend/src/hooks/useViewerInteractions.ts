@@ -13,7 +13,7 @@ interface UseViewerInteractionsParams {
   startRotate?: DragStarter;
 }
 
-// Left drag = pan, right drag = zoom, left+right drag = window level/width, middle drag = rotate (if provided).
+// Left drag = pan, right drag = zoom, left+right drag = window level/width, middle drag = tilt about the image x axis (if provided).
 export function useViewerInteractions(params: UseViewerInteractionsParams): {
   viewTransform: ViewTransform;
   handlePointerEvent: (e: PointerEvent<HTMLCanvasElement>) => void;
