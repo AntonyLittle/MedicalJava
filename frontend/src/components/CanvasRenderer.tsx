@@ -1,4 +1,4 @@
-import { forwardRef, useCallback, useEffect, useRef } from 'react';
+import { forwardRef, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { PointerEvent } from 'react';
 import type { RadioDensities } from '../api/types';
 import { IDENTITY_VIEW_TRANSFORM, sourceToCanvas, type ViewTransform } from '../utils/canvasMath';
@@ -37,6 +37,55 @@ function voxelToGray(hu: number, windowLevel: number, windowWidth: number): numb
   return Math.round(((hu - lowerBound) / (upperBound - lowerBound)) * 255);
 }
 
+// Indexed by value + LUT_OFFSET so any 16-bit voxel value maps without per-pixel window arithmetic.
+const LUT_OFFSET = 32768;
+const LUT_SIZE = 65536;
+
+function buildGrayLut(windowLevel: number, windowWidth: number): Uint8ClampedArray {
+  const lut = new Uint8ClampedArray(LUT_SIZE);
+  for (let i = 0; i < LUT_SIZE; i++) lut[i] = voxelToGray(i - LUT_OFFSET, windowLevel, windowWidth);
+  return lut;
+}
+
+// The windowed image at source resolution; panning and zooming only redraw it, they don't rebuild it.
+interface SourceImage {
+  canvas: HTMLCanvasElement;
+  context: CanvasRenderingContext2D;
+  imageData: ImageData;
+  densities: RadioDensities;
+  lut: Uint8ClampedArray;
+}
+
+function paintSourceImage(previous: SourceImage | null, densities: RadioDensities, lut: Uint8ClampedArray): SourceImage | null {
+  const { widthPixels, heightPixels, radiodensities } = densities;
+
+  let canvas = previous?.canvas;
+  let context = previous?.context;
+  let imageData = previous?.imageData;
+  if (!canvas || !context || !imageData || canvas.width !== widthPixels || canvas.height !== heightPixels) {
+    canvas = document.createElement('canvas');
+    canvas.width = widthPixels;
+    canvas.height = heightPixels;
+    context = canvas.getContext('2d') ?? undefined;
+    if (!context) return null;
+    imageData = context.createImageData(widthPixels, heightPixels);
+  }
+
+  const data = imageData.data;
+  const pixelCount = widthPixels * heightPixels;
+  for (let i = 0, offset = 0; i < pixelCount; i++, offset += 4) {
+    const index = Math.min(LUT_SIZE - 1, Math.max(0, Math.round(radiodensities[i]) + LUT_OFFSET));
+    const gray = lut[index];
+    data[offset] = gray;
+    data[offset + 1] = gray;
+    data[offset + 2] = gray;
+    data[offset + 3] = 255;
+  }
+  context.putImageData(imageData, 0, 0);
+
+  return { canvas, context, imageData, densities, lut };
+}
+
 export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>(function CanvasRenderer(
   { width, height, radioDensities, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onDoubleClick, borderColor, drawOverlay },
   forwardedRef
@@ -47,67 +96,51 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
     [forwardedRef]
   );
 
+  const lut = useMemo(() => buildGrayLut(windowLevel, windowWidth), [windowLevel, windowWidth]);
+  const sourceImageRef = useRef<SourceImage | null>(null);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!radioDensities || !canvas) return;
 
-    canvas.width = width;
-    canvas.height = height;
+    // Assigning width/height clears and reallocates the canvas, so only do it when the size changed.
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
 
     const context = canvas.getContext('2d');
     if (!context) return;
 
-    blitAndScaleRadiodensities(radioDensities.radiodensities, radioDensities.widthPixels, radioDensities.heightPixels, context, width, height);
+    let source = sourceImageRef.current;
+    if (!source || source.densities !== radioDensities || source.lut !== lut) {
+      source = paintSourceImage(source, radioDensities, lut);
+      sourceImageRef.current = source;
+    }
+    if (!source) return;
+
+    const { widthPixels, heightPixels } = radioDensities;
+    const scale = Math.max(widthPixels / width, heightPixels / height);
+    const imageScale = viewTransform.zoom / scale;
+
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.fillStyle = '#000';
+    context.fillRect(0, 0, width, height);
+    context.imageSmoothingEnabled = false;
+    // Zoom about the canvas centre, then pan.
+    context.setTransform(
+      imageScale,
+      0,
+      0,
+      imageScale,
+      (width / 2) * (1 - viewTransform.zoom) + viewTransform.panX,
+      (height / 2) * (1 - viewTransform.zoom) + viewTransform.panY
+    );
+    context.drawImage(source.canvas, 0, 0);
+    context.setTransform(1, 0, 0, 1, 0, 0);
 
     drawOverlay?.(context, (imageX, imageY) =>
-      sourceToCanvas(imageX, imageY, radioDensities.widthPixels, radioDensities.heightPixels, width, height, viewTransform)
+      sourceToCanvas(imageX, imageY, widthPixels, heightPixels, width, height, viewTransform)
     );
-
-  }, [radioDensities, windowLevel, windowWidth, viewTransform, drawOverlay, width, height]);
-
-  function blitAndScaleRadiodensities(
-    radiodensities: ArrayLike<number>,
-    radiodensityWidth: number,
-    radiodensityHeight: number,
-    context: CanvasRenderingContext2D,
-    canvasWidth: number,
-    canvasHeight: number
-  ) {
-
-    const imageData = context.createImageData(canvasWidth, canvasHeight);
-    const data = imageData.data;
-
-    let xScale = radiodensityWidth / canvasWidth;
-    let yScale = radiodensityHeight / canvasHeight;
-    let scale = Math.max(xScale, yScale);
-
-    for (let y = 0; y < canvasHeight; y++) {
-      for (let x = 0; x < canvasWidth; x++) {
-        const offset = ((y * canvasWidth) + x) * 4;
-
-        // Inverse of the view transform: canvas pixel -> unzoomed, unpanned canvas pixel.
-        const unzoomedX = (x - canvasWidth / 2 - viewTransform.panX) / viewTransform.zoom + canvasWidth / 2;
-        const unzoomedY = (y - canvasHeight / 2 - viewTransform.panY) / viewTransform.zoom + canvasHeight / 2;
-        const radiodensityX = Math.floor(unzoomedX * scale);
-        const radiodensityY = Math.floor(unzoomedY * scale);
-
-        if (radiodensityY >= 0 && radiodensityX >= 0 && radiodensityY < radiodensityHeight && radiodensityX < radiodensityWidth) {
-          const intensity = (radiodensityY * radiodensityWidth) + radiodensityX;
-          const gray = voxelToGray(radiodensities[intensity], windowLevel, windowWidth);
-
-          data[offset] = gray;
-          data[offset + 1] = gray;
-          data[offset + 2] = gray;
-        } else {
-          data[offset] = 0;
-          data[offset + 1] = 0;
-          data[offset + 2] = 0;
-        }
-        data[offset + 3] = 255;
-      }
-    }
-    context.putImageData(imageData, 0, 0);
-  }
+  }, [radioDensities, lut, viewTransform, drawOverlay, width, height]);
 
   return (
     <canvas

@@ -498,38 +498,66 @@ export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane,
   return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacing) };
 }
 
-// Axial slabs on square voxels need no interpolation: combine the stored slices inside the slab directly.
+// Axial slabs on square voxels need no interpolation: combine the stored slices directly.
+// Each slice counts by how much of its depth interval lies inside the slab, so the image changes continuously
+// as the slab slides instead of jumping when a slice enters or leaves. step > 1 decimates pixels for cheap previews.
 function sampleAxialSlabFromSlices(
   slices: Slice[],
   centreZ: number,
   slab: SlabOptions,
-  maxSamples: number,
+  step: number,
   geometry: ImageGeometry
 ): RadioDensities | undefined {
-  const half = slab.thicknessMm / 2;
-  const inside = slices.filter((s) => Math.abs(s.depthPositionMm - centreZ) <= half + EPSILON);
-  if (inside.length === 0) return undefined;
+  const slabMin = centreZ - slab.thicknessMm / 2;
+  const slabMax = centreZ + slab.thicknessMm / 2;
+  const depths = slices.map((s) => s.depthPositionMm);
+  const last = depths.length - 1;
+
+  const weights = depths.map((depth, i) => {
+    const below = i > 0 ? (depth - depths[i - 1]) / 2 : last > 0 ? (depths[1] - depth) / 2 : 0.5;
+    const above = i < last ? (depths[i + 1] - depth) / 2 : last > 0 ? (depth - depths[i - 1]) / 2 : 0.5;
+    const overlap = Math.min(depth + above, slabMax) - Math.max(depth - below, slabMin);
+    const weight = Math.min(1, Math.max(0, overlap / (below + above)));
+    return weight < 1e-3 ? 0 : weight > 1 - 1e-3 ? 1 : weight;
+  });
+  if (weights.every((w) => w === 0)) return undefined;
 
   const { widthPixels, heightPixels } = slices[0];
-  const stride = Math.max(1, Math.ceil(inside.length / maxSamples));
-  const accumulated = Float32Array.from(inside[0].radiodensities);
-  const size = accumulated.length;
-  let used = 1;
+  const outWidth = Math.ceil(widthPixels / step);
+  const outHeight = Math.ceil(heightPixels / step);
+  const accumulated = new Float32Array(outWidth * outHeight);
 
-  for (let j = stride; j < inside.length; j += stride) {
-    const data = inside[j].radiodensities;
-    used++;
-    if (slab.mode === 'max') {
-      for (let i = 0; i < size; i++) if (data[i] > accumulated[i]) accumulated[i] = data[i];
-    } else if (slab.mode === 'min') {
-      for (let i = 0; i < size; i++) if (data[i] < accumulated[i]) accumulated[i] = data[i];
-    } else {
-      for (let i = 0; i < size; i++) accumulated[i] += data[i];
+  // Max/min start from a fully covered slice (or the best covered one) so a partly covered edge slice
+  // can only pull the result part of the way towards its own value.
+  const baseIndex = weights.includes(1) ? weights.indexOf(1) : weights.indexOf(Math.max(...weights));
+  const fold = (data: Int16Array, weight: number, mode: ProjectionMode) => {
+    for (let y = 0, o = 0; y < outHeight; y++) {
+      const rowStart = y * step * widthPixels;
+      for (let x = 0; x < outWidth; x++, o++) {
+        const value = data[rowStart + x * step];
+        const current = accumulated[o];
+        if (mode === 'average') accumulated[o] = current + value * weight;
+        else if (mode === 'max' ? value > current : value < current) accumulated[o] = current + weight * (value - current);
+      }
+    }
+  };
+
+  if (slab.mode !== 'average') {
+    for (let y = 0, o = 0; y < outHeight; y++) {
+      for (let x = 0; x < outWidth; x++, o++) accumulated[o] = slices[baseIndex].radiodensities[y * step * widthPixels + x * step];
     }
   }
-  if (slab.mode === 'average') for (let i = 0; i < size; i++) accumulated[i] /= used;
+  let totalWeight = 0;
+  for (let i = 0; i < slices.length; i++) {
+    if (weights[i] === 0 || (slab.mode !== 'average' && i === baseIndex)) continue;
+    fold(slices[i].radiodensities, weights[i], slab.mode);
+    totalWeight += weights[i];
+  }
+  if (slab.mode === 'average') {
+    for (let o = 0; o < accumulated.length; o++) accumulated[o] /= totalWeight;
+  }
 
-  return { widthPixels, heightPixels, radiodensities: accumulated, geometry };
+  return { widthPixels: outWidth, heightPixels: outHeight, radiodensities: accumulated, geometry };
 }
 
 // Projects a slab centred on the plane; samples outside the volume are ignored.
@@ -544,13 +572,13 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
   if (sampleCount <= 1) return sampleCrossSection(volume, viewablePlane, spacingScale);
 
   const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = volume.slices[0];
-  if (aligned && orientation === 'axial' && sx === sy && spacingScale === 1) {
+  if (aligned && orientation === 'axial' && sx === sy && Number.isInteger(spacingScale)) {
     const direct = sampleAxialSlabFromSlices(
       volume.slices,
       viewablePlane.positionXyz.z,
       slab,
-      maxSamples,
-      planeImageGeometry(volume, viewablePlane, sx)
+      spacingScale,
+      planeImageGeometry(volume, viewablePlane, sx * spacingScale)
     );
     if (direct) return direct;
   }

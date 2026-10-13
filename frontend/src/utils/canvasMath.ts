@@ -196,3 +196,8 @@ export function computeWheelSliceSteps(accumulated: number): { steps: number; re
   const steps = Math.trunc(accumulated / WHEEL_DELTA_PER_SLICE);
   return { steps, remainder: accumulated - steps * WHEEL_DELTA_PER_SLICE };
 }
+
+// Continuous distance (1 mm per WHEEL_DELTA_PER_SLICE units) so small trackpad deltas still move the plane.
+export function computeWheelDistanceMm(delta: number): number {
+  return delta / WHEEL_DELTA_PER_SLICE;
+}

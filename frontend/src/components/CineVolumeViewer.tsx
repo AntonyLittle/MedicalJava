@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { memo, useRef } from 'react';
 import type { Volume } from '../api/types';
 import { CanvasRenderer } from './CanvasRenderer';
 import { useWheelSliceScroll as useWheelScroll } from '../hooks/useWheelSliceScroll';
@@ -15,7 +15,7 @@ interface VolumeViewerProps {
   onWindowWidthChange: (width: number) => void;
 }
 
-export function CineVolumeViewer({
+export const CineVolumeViewer = memo(function CineVolumeViewer({
   volume,
   sliceIndex,
   onSliceIndexChange,
@@ -50,4 +50,4 @@ export function CineVolumeViewer({
       onPointerUp={handlePointerEvent}
     />
   );
-}
+});

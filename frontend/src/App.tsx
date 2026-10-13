@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { buildMprPlanes, IDENTITY_ROTATION, type Coordinate, type Quaternion, type ViewablePlane } from './utils/canvasMath';
 import { getVolumeBounds, type ProjectionMode } from './utils/mprSampler';
 import { Alert, Box, Button, CircularProgress, Container, Typography } from '@mui/material';
@@ -30,7 +30,7 @@ function App() {
   const [mprRotation, setMprRotation] = useState<Quaternion>(IDENTITY_ROTATION);
   const mprPlanes = useMemo(() => buildMprPlanes(mprPosition, mprRotation), [mprPosition, mprRotation]);
   const { axial: axialPlane, coronal: coronalPlane, sagittal: sagittalPlane } = mprPlanes;
-  const handleMprPlaneChange = (plane: ViewablePlane) => setMprPosition(plane.positionXyz);
+  const handleMprPlaneChange = useCallback((plane: ViewablePlane) => setMprPosition(plane.positionXyz), []);
 
   const [slabThicknessMm, setSlabThicknessMm] = useState(DEFAULT_SLAB_THICKNESS_MM);
   const deferredSlabThicknessMm = useDeferredValue(slabThicknessMm);
