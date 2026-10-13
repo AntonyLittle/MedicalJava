@@ -6,6 +6,7 @@ import {
   PREVIEW_SLAB_SAMPLES,
   PREVIEW_SPACING_SCALE,
   sampleSlab,
+  sampleSlabJob,
   type ProjectionMode,
 } from '../utils/mprSampler';
 import { usePlaneParams } from './usePlaneParams';
@@ -31,10 +32,10 @@ export function useThickMprRadioDensities(
       }),
     [volume, params, thicknessMm, mode]
   );
-  const computeFull = useCallback(
-    () => sampleSlab(volume, planeFromParams(volume, params), { thicknessMm, mode }),
+  const startFull = useCallback(
+    () => sampleSlabJob(volume, planeFromParams(volume, params), { thicknessMm, mode }),
     [volume, params, thicknessMm, mode]
   );
 
-  return useProgressiveValue(computePreview, computeFull, hasSlices);
+  return useProgressiveValue(computePreview, startFull, hasSlices);
 }

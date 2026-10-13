@@ -3,7 +3,7 @@ import type { RadioDensities, Volume } from '../api/types';
 import type { ViewablePlane } from '../utils/canvasMath';
 import { isAxisAligned, planeFromParams, PREVIEW_SPACING_SCALE, sampleCrossSection } from '../utils/mprSampler';
 import { usePlaneParams } from './usePlaneParams';
-import { useProgressiveValue } from './useProgressiveValue';
+import { immediateJob, useProgressiveValue } from './useProgressiveValue';
 
 // Rotated planes show a coarser result first, then full quality once the plane stops changing.
 export function useThinMprRadioDensities(volume: Volume, viewablePlane: ViewablePlane): RadioDensities | undefined {
@@ -14,10 +14,10 @@ export function useThinMprRadioDensities(volume: Volume, viewablePlane: Viewable
     () => sampleCrossSection(volume, planeFromParams(volume, params), oblique ? PREVIEW_SPACING_SCALE : 1),
     [volume, params, oblique]
   );
-  const computeFull = useCallback(
-    () => sampleCrossSection(volume, planeFromParams(volume, params)),
+  const startFull = useCallback(
+    () => immediateJob(() => sampleCrossSection(volume, planeFromParams(volume, params))),
     [volume, params]
   );
 
-  return useProgressiveValue(computePreview, computeFull, oblique);
+  return useProgressiveValue(computePreview, startFull, oblique);
 }

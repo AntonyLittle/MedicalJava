@@ -42,19 +42,50 @@ export function orientationFromNormal(normal: Coordinate): PlaneOrientation {
   return 'sagittal';
 }
 
+interface VolumeInfo {
+  depths: number[];
+  data: Int16Array[];
+  // 0 when the slices are not evenly spaced.
+  depthStep: number;
+  bounds: { min: Coordinate; max: Coordinate };
+}
+
+// Volumes are immutable once loaded, and these values are needed for every sample of every frame.
+const volumeInfoCache = new WeakMap<Volume, VolumeInfo>();
+
+function volumeInfo(volume: Volume): VolumeInfo {
+  let info = volumeInfoCache.get(volume);
+  if (!info) {
+    const first = volume.slices[0];
+    const depths = volume.slices.map((s) => s.depthPositionMm);
+    const last = depths.length - 1;
+    const step = last > 0 ? (depths[last] - depths[0]) / last : 0;
+    const uniform = step > 0 && depths.every((depth, i) => Math.abs(depth - (depths[0] + i * step)) <= 1e-3 * step);
+    info = {
+      depths,
+      data: volume.slices.map((s) => s.radiodensities),
+      depthStep: uniform ? step : 0,
+      bounds: {
+        min: { x: first.originXMm, y: first.originYMm, z: Math.min(...depths) },
+        max: {
+          x: first.originXMm + (first.widthPixels - 1) * first.pixelSpacingXMm,
+          y: first.originYMm + (first.heightPixels - 1) * first.pixelSpacingYMm,
+          z: Math.max(...depths),
+        },
+      },
+    };
+    volumeInfoCache.set(volume, info);
+  }
+  return info;
+}
+
 // Extent of the voxel centres in patient coordinates (mm); assumes slices are sorted by depth and share an x/y origin.
 export function getVolumeBounds(volume: Volume): { min: Coordinate; max: Coordinate } {
-  const first = volume.slices[0];
-  const depths = volume.slices.map((s) => s.depthPositionMm);
-  return {
-    min: { x: first.originXMm, y: first.originYMm, z: Math.min(...depths) },
-    max: {
-      x: first.originXMm + (first.widthPixels - 1) * first.pixelSpacingXMm,
-      y: first.originYMm + (first.heightPixels - 1) * first.pixelSpacingYMm,
-      z: Math.max(...depths),
-    },
-  };
+  return volumeInfo(volume).bounds;
 }
+
+// Receives the values for columns colStart..colEnd of one output row; other columns are outside the volume.
+type RowSink = (row: number, colStart: number, colEnd: number, values: Float32Array) => void;
 
 // Fractional slice index for a depth, or NaN when outside the volume.
 function depthToSliceCoordinate(depths: number[], z: number): number {
@@ -203,19 +234,19 @@ function planeGrid(volume: Volume, orientation: PlaneOrientation, spacing: numbe
   return { widthPixels: inPlane, heightPixels: cells(bounds.min.z, bounds.max.z) };
 }
 
-// Visits every pixel of the plane's grid with its interpolated value (NaN outside the volume).
+// Calls onRow for every row of the plane's grid with interpolated values (NaN outside the volume).
 // Only the plane position along its dominant normal axis is used; in-plane axes are fixed per orientation.
 function samplePlane(
   volume: Volume,
   viewablePlane: ViewablePlane,
   grid: PlaneGrid,
   outSpacing: number,
-  visit: (index: number, value: number) => void
+  rowBuf: Float32Array,
+  onRow: RowSink
 ): void {
   const slices = volume.slices;
   const { widthPixels: width, heightPixels: height, pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
-  const bounds = getVolumeBounds(volume);
-  const depths = slices.map((s) => s.depthPositionMm);
+  const { depths, bounds } = volumeInfo(volume);
   const orientation = orientationFromNormal(viewablePlane.normalXyz);
   const position = viewablePlane.positionXyz;
   const { widthPixels: outWidth, heightPixels: outHeight } = grid;
@@ -224,7 +255,8 @@ function samplePlane(
     const zw = createWeights(1);
     setWeight(zw, 0, depthToSliceCoordinate(depths, position.z), slices.length);
     if (zw.i0[0] < 0) {
-      for (let i = 0; i < outWidth * outHeight; i++) visit(i, NaN);
+      rowBuf.fill(NaN, 0, outWidth);
+      for (let row = 0; row < outHeight; row++) onRow(row, 0, outWidth - 1, rowBuf);
       return;
     }
 
@@ -240,16 +272,16 @@ function samplePlane(
       const b1 = yw.i1[row] * width;
       const ty = yw.t[row];
       for (let col = 0; col < outWidth; col++) {
-        const index = row * outWidth + col;
         const x0 = xw.i0[col];
         if (rowY0 < 0 || x0 < 0) {
-          visit(index, NaN);
+          rowBuf[col] = NaN;
           continue;
         }
         let value = bilinear(dataA, b0, b1, x0, xw.i1[col], xw.t[col], ty);
         if (dataB) value = value * (1 - tz) + bilinear(dataB, b0, b1, x0, xw.i1[col], xw.t[col], ty) * tz;
-        visit(index, value);
+        rowBuf[col] = value;
       }
+      onRow(row, 0, outWidth - 1, rowBuf);
     }
     return;
   }
@@ -299,17 +331,17 @@ function samplePlane(
     const dataB = rowValid && tz > 0 ? slices[zw.i1[0]].radiodensities : null;
 
     for (let col = 0; col < outWidth; col++) {
-      const index = row * outWidth + col;
       if (!dataA || colX0[col] < 0) {
-        visit(index, NaN);
+        rowBuf[col] = NaN;
         continue;
       }
       let value = bilinear(dataA, colB0[col], colB1[col], colX0[col], colX1[col], colTx[col], colTy[col]);
       if (dataB) {
         value = value * (1 - tz) + bilinear(dataB, colB0[col], colB1[col], colX0[col], colX1[col], colTx[col], colTy[col]) * tz;
       }
-      visit(index, value);
+      rowBuf[col] = value;
     }
+    onRow(row, 0, outWidth - 1, rowBuf);
   }
 }
 
@@ -380,49 +412,69 @@ export function fitSpacingScale(volume: Volume, plane: PlaneAxes, maxPixels: num
   return Math.max(1, extentMm / (maxPixels * outputSpacing(volume)));
 }
 
-// NaN outside the volume.
-function sampleTrilinear(slices: Slice[], width: number, height: number, fx: number, fy: number, fz: number): number {
-  const lastSlice = slices.length - 1;
-  if (
-    !(fx >= -EPSILON && fx <= width - 1 + EPSILON && fy >= -EPSILON && fy <= height - 1 + EPSILON) ||
-    !(fz >= -EPSILON && fz <= lastSlice + EPSILON)
-  ) {
-    return NaN;
-  }
-
-  const x0 = Math.min(width - 1, Math.max(0, Math.floor(fx)));
-  const y0 = Math.min(height - 1, Math.max(0, Math.floor(fy)));
-  const z0 = Math.min(lastSlice, Math.max(0, Math.floor(fz)));
-  const x1 = Math.min(width - 1, x0 + 1);
-  const y1 = Math.min(height - 1, y0 + 1);
-  const tx = Math.min(1, Math.max(0, fx - x0));
-  const ty = Math.min(1, Math.max(0, fy - y0));
-  const tz = Math.min(1, Math.max(0, fz - z0));
+// The caller guarantees the coordinates lie inside the volume (within EPSILON), so there is no bounds checking.
+function trilinearInside(
+  data: Int16Array[],
+  width: number,
+  lastX: number,
+  lastY: number,
+  lastSlice: number,
+  fx: number,
+  fy: number,
+  fz: number
+): number {
+  const x0 = fx | 0;
+  const y0 = fy | 0;
+  const z0 = fz | 0;
+  const x1 = x0 < lastX ? x0 + 1 : x0;
   const b0 = y0 * width;
-  const b1 = y1 * width;
+  const b1 = (y0 < lastY ? y0 + 1 : y0) * width;
+  const tx = fx - x0;
+  const ty = fy - y0;
 
-  const near = bilinear(slices[z0].radiodensities, b0, b1, x0, x1, tx, ty);
-  if (tz === 0 || z0 === lastSlice) return near;
-  return near * (1 - tz) + bilinear(slices[z0 + 1].radiodensities, b0, b1, x0, x1, tx, ty) * tz;
+  const near = data[z0];
+  const nearTop = near[b0 + x0] + (near[b0 + x1] - near[b0 + x0]) * tx;
+  const nearBottom = near[b1 + x0] + (near[b1 + x1] - near[b1 + x0]) * tx;
+  const lower = nearTop + (nearBottom - nearTop) * ty;
+  if (z0 >= lastSlice) return lower;
+
+  const far = data[z0 + 1];
+  const farTop = far[b0 + x0] + (far[b0 + x1] - far[b0 + x0]) * tx;
+  const farBottom = far[b1 + x0] + (far[b1 + x1] - far[b1 + x0]) * tx;
+  const upper = farTop + (farBottom - farTop) * ty;
+  return lower + (upper - lower) * (fz - z0);
+}
+
+// Narrows the column interval in which f0 + col * df stays inside [0, maxF] (empty when range.hi < 0).
+function clipColumns(range: { lo: number; hi: number }, f0: number, df: number, maxF: number): void {
+  if (Math.abs(df) < 1e-12) {
+    if (f0 < -EPSILON || f0 > maxF + EPSILON) range.hi = -1;
+    return;
+  }
+  const a = (-EPSILON - f0) / df;
+  const b = (maxF + EPSILON - f0) / df;
+  range.lo = Math.max(range.lo, Math.min(a, b));
+  range.hi = Math.min(range.hi, Math.max(a, b));
 }
 
 // General path for rotated planes: each pixel is mapped to a 3D point and interpolated.
+// Rows are clipped to the part inside the volume, so the empty corners of the grid cost nothing.
 function sampleObliquePlane(
   volume: Volume,
   plane: ViewablePlane,
   grid: ObliqueGrid,
   spacing: number,
-  visit: (index: number, value: number) => void
+  rowBuf: Float32Array,
+  onRow: RowSink
 ): void {
   const slices = volume.slices;
   const { widthPixels: width, heightPixels: height, pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
   const originX = slices[0].originXMm;
   const originY = slices[0].originYMm;
-  const depths = slices.map((s) => s.depthPositionMm);
+  const { depths, depthStep, data } = volumeInfo(volume);
   const lastSlice = depths.length - 1;
-  const depthStep = lastSlice > 0 ? (depths[lastSlice] - depths[0]) / lastSlice : 0;
-  const uniformDepths =
-    depthStep > 0 && depths.every((depth, i) => Math.abs(depth - (depths[0] + i * depthStep)) <= 1e-3 * depthStep);
+  const lastX = width - 1;
+  const lastY = height - 1;
 
   const centre = volumeCentre(volume);
   const n = plane.normalXyz;
@@ -436,24 +488,49 @@ function sampleObliquePlane(
   const startY = centre.y + n.y * offset + r.y * grid.uMin + d.y * grid.vMin;
   const startZ = centre.z + n.z * offset + r.z * grid.uMin + d.z * grid.vMin;
 
+  // Change in voxel coordinates per output column.
+  const dfx = (r.x * spacing) / sx;
+  const dfy = (r.y * spacing) / sy;
+  const dfz = depthStep > 0 ? (r.z * spacing) / depthStep : 0;
+  const range = { lo: 0, hi: 0 };
+
   for (let row = 0; row < grid.heightPixels; row++) {
-    let px = startX + d.x * spacing * row;
-    let py = startY + d.y * spacing * row;
-    let pz = startZ + d.z * spacing * row;
-    for (let col = 0; col < grid.widthPixels; col++) {
-      const fz = uniformDepths ? (pz - depths[0]) / depthStep : depthToSliceCoordinate(depths, pz);
-      visit(row * grid.widthPixels + col, sampleTrilinear(slices, width, height, (px - originX) / sx, (py - originY) / sy, fz));
-      px += r.x * spacing;
-      py += r.y * spacing;
-      pz += r.z * spacing;
+    const px = startX + d.x * spacing * row;
+    const py = startY + d.y * spacing * row;
+    const pz = startZ + d.z * spacing * row;
+    const fx0 = (px - originX) / sx;
+    const fy0 = (py - originY) / sy;
+    const fz0 = depthStep > 0 ? (pz - depths[0]) / depthStep : 0;
+
+    range.lo = 0;
+    range.hi = grid.widthPixels - 1;
+    clipColumns(range, fx0, dfx, width - 1);
+    clipColumns(range, fy0, dfy, height - 1);
+    if (depthStep > 0) clipColumns(range, fz0, dfz, lastSlice);
+    const colStart = Math.max(0, Math.ceil(range.lo));
+    const colEnd = Math.min(grid.widthPixels - 1, Math.floor(range.hi));
+    if (colStart > colEnd) continue;
+
+    if (depthStep > 0) {
+      for (let col = colStart; col <= colEnd; col++) {
+        rowBuf[col] = trilinearInside(data, width, lastX, lastY, lastSlice, fx0 + col * dfx, fy0 + col * dfy, fz0 + col * dfz);
+      }
+    } else {
+      for (let col = colStart; col <= colEnd; col++) {
+        const fz = depthToSliceCoordinate(depths, pz + col * r.z * spacing);
+        rowBuf[col] = Number.isNaN(fz)
+          ? NaN
+          : trilinearInside(data, width, lastX, lastY, lastSlice, fx0 + col * dfx, fy0 + col * dfy, fz);
+      }
     }
+    onRow(row, colStart, colEnd, rowBuf);
   }
 }
 
 interface PlaneSampling {
   grid: PlaneGrid;
   spacing: number;
-  run: (plane: ViewablePlane, visit: (index: number, value: number) => void) => void;
+  run: (plane: ViewablePlane, onRow: RowSink) => void;
 }
 
 // The grid is fixed for a given rotation, so slab sub-planes (shifted along the normal) reuse it.
@@ -461,13 +538,15 @@ function createPlaneSampling(volume: Volume, plane: ViewablePlane, spacingScale:
   const spacing = outputSpacing(volume) * spacingScale;
   if (isAxisAligned(plane)) {
     const grid = planeGrid(volume, orientationFromNormal(plane.normalXyz), spacing);
-    return { grid, spacing, run: (p, visit) => samplePlane(volume, p, grid, spacing, visit) };
+    const rowBuf = new Float32Array(grid.widthPixels);
+    return { grid, spacing, run: (p, onRow) => samplePlane(volume, p, grid, spacing, rowBuf, onRow) };
   }
   const grid = obliqueGrid(volume, plane, spacing);
+  const rowBuf = new Float32Array(grid.widthPixels);
   return {
     grid: { widthPixels: grid.widthPixels, heightPixels: grid.heightPixels },
     spacing,
-    run: (p, visit) => sampleObliquePlane(volume, p, grid, spacing, visit),
+    run: (p, onRow) => sampleObliquePlane(volume, p, grid, spacing, rowBuf, onRow),
   };
 }
 
@@ -476,7 +555,7 @@ export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane,
   if (slices.length === 0) return undefined;
 
   if (isAxisAligned(viewablePlane) && orientationFromNormal(viewablePlane.normalXyz) === 'axial') {
-    const fz = depthToSliceCoordinate(slices.map((s) => s.depthPositionMm), viewablePlane.positionXyz.z);
+    const fz = depthToSliceCoordinate(volumeInfo(volume).depths, viewablePlane.positionXyz.z);
     if (Number.isNaN(fz)) return undefined;
     const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
     if (spacingScale === 1 && sx === sy && Math.abs(fz - Math.round(fz)) < EPSILON) {
@@ -491,35 +570,90 @@ export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane,
   }
 
   const { grid, spacing, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
-  const out = new Float32Array(grid.widthPixels * grid.heightPixels);
-  run(viewablePlane, (i, value) => {
-    out[i] = Number.isNaN(value) ? OUTSIDE_VOLUME_VALUE : value;
+  const out = new Float32Array(grid.widthPixels * grid.heightPixels).fill(OUTSIDE_VOLUME_VALUE);
+  run(viewablePlane, (row, colStart, colEnd, values) => {
+    const base = row * grid.widthPixels;
+    for (let col = colStart; col <= colEnd; col++) {
+      const value = values[col];
+      if (!Number.isNaN(value)) out[base + col] = value;
+    }
   });
   return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacing) };
+}
+
+// A slab computation that yields between units of work so callers can spread it over several frames.
+export type SlabJob = Generator<void, RadioDensities | undefined, void>;
+
+// Fraction (0..1) of each sample's interval, centred on its position, that lies inside [slabMin, slabMax].
+function coverageWeights(positions: ArrayLike<number>, slabMin: number, slabMax: number): number[] {
+  const last = positions.length - 1;
+  const weights: number[] = [];
+  for (let i = 0; i <= last; i++) {
+    const position = positions[i];
+    const below = i > 0 ? (position - positions[i - 1]) / 2 : last > 0 ? (positions[1] - position) / 2 : 0.5;
+    const above = i < last ? (positions[i + 1] - position) / 2 : last > 0 ? (position - positions[i - 1]) / 2 : 0.5;
+    const overlap = Math.min(position + above, slabMax) - Math.max(position - below, slabMin);
+    const weight = Math.min(1, Math.max(0, overlap / (below + above)));
+    weights.push(weight < 1e-3 ? 0 : weight > 1 - 1e-3 ? 1 : weight);
+  }
+  return weights;
+}
+
+// Max/min move the result only part of the way towards a partly covered sample, so it can't jump as the slab slides.
+function foldInto(accumulated: Float32Array, values: ArrayLike<number>, weight: number, mode: ProjectionMode): void {
+  const size = accumulated.length;
+  if (mode === 'average') {
+    for (let o = 0; o < size; o++) accumulated[o] += values[o] * weight;
+  } else if (mode === 'max') {
+    for (let o = 0; o < size; o++) {
+      const value = values[o];
+      const current = accumulated[o];
+      if (value > current) accumulated[o] = current + weight * (value - current);
+    }
+  } else {
+    for (let o = 0; o < size; o++) {
+      const value = values[o];
+      const current = accumulated[o];
+      if (value < current) accumulated[o] = current + weight * (value - current);
+    }
+  }
+}
+
+// Value at flat index a + offset (blended with b + offset by t), then blended between two slices by tz.
+function readVoxel(
+  dataA: Int16Array,
+  dataB: Int16Array | null,
+  tz: number,
+  a: number,
+  b: number,
+  t: number,
+  offset: number
+): number {
+  let value = dataA[a + offset];
+  if (t > 0) value += (dataA[b + offset] - value) * t;
+  if (dataB) {
+    let other = dataB[a + offset];
+    if (t > 0) other += (dataB[b + offset] - other) * t;
+    value += (other - value) * tz;
+  }
+  return value;
 }
 
 // Axial slabs on square voxels need no interpolation: combine the stored slices directly.
 // Each slice counts by how much of its depth interval lies inside the slab, so the image changes continuously
 // as the slab slides instead of jumping when a slice enters or leaves. step > 1 decimates pixels for cheap previews.
-function sampleAxialSlabFromSlices(
+function* sampleAxialSlabFromSlices(
   slices: Slice[],
   centreZ: number,
   slab: SlabOptions,
   step: number,
   geometry: ImageGeometry
-): RadioDensities | undefined {
-  const slabMin = centreZ - slab.thicknessMm / 2;
-  const slabMax = centreZ + slab.thicknessMm / 2;
-  const depths = slices.map((s) => s.depthPositionMm);
-  const last = depths.length - 1;
-
-  const weights = depths.map((depth, i) => {
-    const below = i > 0 ? (depth - depths[i - 1]) / 2 : last > 0 ? (depths[1] - depth) / 2 : 0.5;
-    const above = i < last ? (depths[i + 1] - depth) / 2 : last > 0 ? (depth - depths[i - 1]) / 2 : 0.5;
-    const overlap = Math.min(depth + above, slabMax) - Math.max(depth - below, slabMin);
-    const weight = Math.min(1, Math.max(0, overlap / (below + above)));
-    return weight < 1e-3 ? 0 : weight > 1 - 1e-3 ? 1 : weight;
-  });
+): SlabJob {
+  const weights = coverageWeights(
+    slices.map((s) => s.depthPositionMm),
+    centreZ - slab.thicknessMm / 2,
+    centreZ + slab.thicknessMm / 2
+  );
   if (weights.every((w) => w === 0)) return undefined;
 
   const { widthPixels, heightPixels } = slices[0];
@@ -552,6 +686,7 @@ function sampleAxialSlabFromSlices(
     if (weights[i] === 0 || (slab.mode !== 'average' && i === baseIndex)) continue;
     fold(slices[i].radiodensities, weights[i], slab.mode);
     totalWeight += weights[i];
+    yield;
   }
   if (slab.mode === 'average') {
     for (let o = 0; o < accumulated.length; o++) accumulated[o] /= totalWeight;
@@ -560,8 +695,156 @@ function sampleAxialSlabFromSlices(
   return { widthPixels: outWidth, heightPixels: outHeight, radiodensities: accumulated, geometry };
 }
 
+// Coronal/sagittal slabs on the voxel grid: each voxel plane inside the slab is read directly and weighted by how
+// much of it the slab covers. Interpolation weights along the plane are computed once for the whole slab.
+function* sampleSideSlabFromVoxelPlanes(
+  volume: Volume,
+  plane: ViewablePlane,
+  slab: SlabOptions,
+  spacingScale: number,
+  orientation: 'coronal' | 'sagittal'
+): SlabJob {
+  const slices = volume.slices;
+  const { widthPixels: width, heightPixels: height, pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
+  const { depths, bounds } = volumeInfo(volume);
+  const alongY = orientation === 'coronal';
+
+  const planeCount = alongY ? height : width;
+  const planeOrigin = alongY ? slices[0].originYMm : slices[0].originXMm;
+  const planeSpacing = alongY ? sy : sx;
+  const centreAlong = alongY ? plane.positionXyz.y : plane.positionXyz.x;
+  const positions = Array.from({ length: planeCount }, (_, j) => planeOrigin + j * planeSpacing);
+  const weights = coverageWeights(positions, centreAlong - slab.thicknessMm / 2, centreAlong + slab.thicknessMm / 2);
+  if (weights.every((w) => w === 0)) return undefined;
+
+  const outSpacing = outputSpacing(volume) * spacingScale;
+  const grid = planeGrid(volume, orientation, outSpacing);
+  const { widthPixels: outWidth, heightPixels: outHeight } = grid;
+  const size = outWidth * outHeight;
+
+  // Columns run along x for coronal and y for sagittal; a flat index is colA + the voxel plane's offset.
+  const inPlane = alongY ? axisWeights(outWidth, outSpacing, sx, width) : axisWeights(outWidth, outSpacing, sy, height);
+  const colStride = alongY ? 1 : width;
+  const colA = new Int32Array(outWidth);
+  const colB = new Int32Array(outWidth);
+  const colT = new Float64Array(outWidth);
+  for (let c = 0; c < outWidth; c++) {
+    colA[c] = Math.max(0, inPlane.i0[c]) * colStride;
+    colB[c] = Math.max(0, inPlane.i1[c]) * colStride;
+    colT[c] = inPlane.t[c];
+  }
+  const blended = colT.some((t) => t > 0);
+
+  // Rows are z, shared by every voxel plane. Superior (higher z) at the top of the image.
+  const rowA: Int16Array[] = new Array(outHeight);
+  const rowB: (Int16Array | null)[] = new Array(outHeight);
+  const rowT = new Float64Array(outHeight);
+  const zw = createWeights(1);
+  for (let r = 0; r < outHeight; r++) {
+    setWeight(zw, 0, depthToSliceCoordinate(depths, bounds.max.z - r * outSpacing), slices.length);
+    const valid = zw.i0[0] >= 0;
+    rowA[r] = slices[Math.max(0, zw.i0[0])].radiodensities;
+    rowT[r] = valid ? zw.t[0] : 0;
+    rowB[r] = valid && zw.t[0] > 0 ? slices[zw.i1[0]].radiodensities : null;
+  }
+
+  if (!alongY) {
+    // Sagittal: voxel x is the contiguous direction in memory, so reduce across the slab's planes in the inner loop.
+    const base = weights.includes(1) ? weights.indexOf(1) : weights.indexOf(Math.max(...weights));
+    const planeIndex: number[] = [];
+    const planeWeight: number[] = [];
+    let total = 0;
+    for (let j = 0; j < planeCount; j++) {
+      if (weights[j] === 0) continue;
+      total += weights[j];
+      if (slab.mode !== 'average' && j === base) continue;
+      planeIndex.push(j);
+      planeWeight.push(weights[j]);
+    }
+
+    const result = new Float32Array(size);
+    for (let r = 0; r < outHeight; r++) {
+      const dataA = rowA[r];
+      const dataB = rowB[r];
+      const tz = rowT[r];
+      for (let c = 0; c < outWidth; c++) {
+        const a = colA[c];
+        const b = colB[c];
+        const t = colT[c];
+        let value: number;
+        if (slab.mode === 'average') {
+          let sum = 0;
+          for (let k = 0; k < planeIndex.length; k++) sum += planeWeight[k] * readVoxel(dataA, dataB, tz, a, b, t, planeIndex[k]);
+          value = sum / total;
+        } else {
+          value = readVoxel(dataA, dataB, tz, a, b, t, base);
+          for (let k = 0; k < planeIndex.length; k++) {
+            const other = readVoxel(dataA, dataB, tz, a, b, t, planeIndex[k]);
+            if (slab.mode === 'max' ? other > value : other < value) value += planeWeight[k] * (other - value);
+          }
+        }
+        result[r * outWidth + c] = value;
+      }
+      if ((r & 7) === 7) yield;
+    }
+    return { ...grid, radiodensities: result, geometry: planeImageGeometry(volume, plane, outSpacing) };
+  }
+
+  const planeValues = new Float32Array(size);
+  const readPlane = (j: number) => {
+    const offset = alongY ? j * width : j;
+    for (let r = 0; r < outHeight; r++) {
+      const dataA = rowA[r];
+      const dataB = rowB[r];
+      const tz = rowT[r];
+      const base = r * outWidth;
+      for (let c = 0; c < outWidth; c++) {
+        const a = colA[c] + offset;
+        let value = dataA[a];
+        if (blended) value += (dataA[colB[c] + offset] - value) * colT[c];
+        if (dataB) {
+          let other = dataB[a];
+          if (blended) other += (dataB[colB[c] + offset] - other) * colT[c];
+          value += (other - value) * tz;
+        }
+        planeValues[base + c] = value;
+      }
+    }
+  };
+
+  const accumulated = new Float32Array(size);
+  const baseIndex = weights.includes(1) ? weights.indexOf(1) : weights.indexOf(Math.max(...weights));
+  if (slab.mode !== 'average') {
+    readPlane(baseIndex);
+    accumulated.set(planeValues);
+  }
+  let totalWeight = 0;
+  for (let j = 0; j < planeCount; j++) {
+    if (weights[j] === 0 || (slab.mode !== 'average' && j === baseIndex)) continue;
+    readPlane(j);
+    foldInto(accumulated, planeValues, weights[j], slab.mode);
+    totalWeight += weights[j];
+    yield;
+  }
+  if (slab.mode === 'average') {
+    for (let o = 0; o < size; o++) accumulated[o] /= totalWeight;
+  }
+
+  return { ...grid, radiodensities: accumulated, geometry: planeImageGeometry(volume, plane, outSpacing) };
+}
+
+function runToCompletion<T>(job: Generator<void, T, void>): T {
+  let result = job.next();
+  while (!result.done) result = job.next();
+  return result.value;
+}
+
 // Projects a slab centred on the plane; samples outside the volume are ignored.
 export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: SlabOptions): RadioDensities | undefined {
+  return runToCompletion(sampleSlabJob(volume, viewablePlane, slab));
+}
+
+export function* sampleSlabJob(volume: Volume, viewablePlane: ViewablePlane, slab: SlabOptions): SlabJob {
   if (volume.slices.length === 0) return undefined;
 
   const maxSamples = slab.maxSamples ?? MAX_SLAB_SAMPLES;
@@ -573,7 +856,7 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
 
   const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = volume.slices[0];
   if (aligned && orientation === 'axial' && sx === sy && Number.isInteger(spacingScale)) {
-    const direct = sampleAxialSlabFromSlices(
+    const direct = yield* sampleAxialSlabFromSlices(
       volume.slices,
       viewablePlane.positionXyz.z,
       slab,
@@ -582,36 +865,53 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
     );
     if (direct) return direct;
   }
+  if (aligned && orientation !== 'axial') {
+    const direct = yield* sampleSideSlabFromVoxelPlanes(volume, viewablePlane, slab, spacingScale, orientation);
+    if (direct) return direct;
+  }
 
   const { grid, spacing, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
   const size = grid.widthPixels * grid.heightPixels;
   const initial = slab.mode === 'max' ? -Infinity : slab.mode === 'min' ? Infinity : 0;
   const accumulated = new Float64Array(size).fill(initial);
   const counts = new Uint16Array(size);
+  const width = grid.widthPixels;
 
-  const visit =
+  const sink: RowSink =
     slab.mode === 'max'
-      ? (i: number, value: number) => {
-          if (Number.isNaN(value)) return;
-          counts[i]++;
-          if (value > accumulated[i]) accumulated[i] = value;
+      ? (row, colStart, colEnd, values) => {
+          for (let col = colStart; col <= colEnd; col++) {
+            const value = values[col];
+            if (Number.isNaN(value)) continue;
+            const i = row * width + col;
+            counts[i]++;
+            if (value > accumulated[i]) accumulated[i] = value;
+          }
         }
       : slab.mode === 'min'
-        ? (i: number, value: number) => {
-            if (Number.isNaN(value)) return;
-            counts[i]++;
-            if (value < accumulated[i]) accumulated[i] = value;
+        ? (row, colStart, colEnd, values) => {
+            for (let col = colStart; col <= colEnd; col++) {
+              const value = values[col];
+              if (Number.isNaN(value)) continue;
+              const i = row * width + col;
+              counts[i]++;
+              if (value < accumulated[i]) accumulated[i] = value;
+            }
           }
-        : (i: number, value: number) => {
-            if (Number.isNaN(value)) return;
-            counts[i]++;
-            accumulated[i] += value;
+        : (row, colStart, colEnd, values) => {
+            for (let col = colStart; col <= colEnd; col++) {
+              const value = values[col];
+              if (Number.isNaN(value)) continue;
+              const i = row * width + col;
+              counts[i]++;
+              accumulated[i] += value;
+            }
           };
 
   const step = slab.thicknessMm / (sampleCount - 1);
   for (let k = 0; k < sampleCount; k++) {
-    const shifted = moveViewablePlaneForward(viewablePlane, -slab.thicknessMm / 2 + k * step);
-    run(shifted, visit);
+    run(moveViewablePlaneForward(viewablePlane, -slab.thicknessMm / 2 + k * step), sink);
+    yield;
   }
 
   const out = new Float32Array(size);
