@@ -4,10 +4,11 @@ import type { ViewablePlane } from '../utils/canvasMath';
 import { isAxisAligned, planeFromParams, PREVIEW_SPACING_SCALE, sampleCrossSection } from '../utils/mprSampler';
 import { usePlaneParams } from './usePlaneParams';
 import { immediateJob, useProgressiveValue } from './useProgressiveValue';
+import { useScrollDeferredParams } from './useScrollDeferredParams';
 
 // Rotated planes show a coarser result first, then full quality once the plane stops changing.
 export function useThinMprRadioDensities(volume: Volume, viewablePlane: ViewablePlane): RadioDensities | undefined {
-  const params = usePlaneParams(volume, viewablePlane);
+  const params = useScrollDeferredParams(usePlaneParams(volume, viewablePlane));
   const oblique = !isAxisAligned(params);
 
   const computePreview = useCallback(

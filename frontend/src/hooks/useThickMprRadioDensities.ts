@@ -11,6 +11,7 @@ import {
 } from '../utils/mprSampler';
 import { usePlaneParams } from './usePlaneParams';
 import { useProgressiveValue } from './useProgressiveValue';
+import { useScrollDeferredParams } from './useScrollDeferredParams';
 
 // Returns a half-resolution result immediately, then the full-quality one once the inputs stop changing.
 export function useThickMprRadioDensities(
@@ -19,7 +20,7 @@ export function useThickMprRadioDensities(
   thicknessMm: number,
   mode: ProjectionMode
 ): RadioDensities | undefined {
-  const params = usePlaneParams(volume, viewablePlane);
+  const params = useScrollDeferredParams(usePlaneParams(volume, viewablePlane));
   const hasSlices = volume.slices.length > 0;
 
   const computePreview = useCallback(

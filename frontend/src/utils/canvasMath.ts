@@ -121,6 +121,26 @@ export function computeCameraRotationFromDrag(
   return normalizeQuaternion(multiplyQuaternions(yaw, multiplyQuaternions(pitch, start)));
 }
 
+// Millimetres per source pixel along each axis; images without it are treated as square.
+export interface PixelSpacing {
+  u: number;
+  v: number;
+}
+
+const SQUARE_PIXELS: PixelSpacing = { u: 1, v: 1 };
+
+// Canvas pixels per source pixel along each axis at zoom 1, fitting the image's physical size into the canvas.
+export function fitImageScale(
+  sourceWidth: number,
+  sourceHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  spacing: PixelSpacing = SQUARE_PIXELS
+): { x: number; y: number } {
+  const mmPerCanvasPixel = Math.max((sourceWidth * spacing.u) / canvasWidth, (sourceHeight * spacing.v) / canvasHeight);
+  return { x: spacing.u / mmPerCanvasPixel, y: spacing.v / mmPerCanvasPixel };
+}
+
 // Inverse of CanvasRenderer's pixel mapping; returns the canvas position of the centre of a source pixel.
 export function sourceToCanvas(
   sourceX: number,
@@ -129,11 +149,12 @@ export function sourceToCanvas(
   sourceHeight: number,
   canvasWidth: number,
   canvasHeight: number,
-  viewTransform: ViewTransform
+  viewTransform: ViewTransform,
+  spacing: PixelSpacing = SQUARE_PIXELS
 ): { x: number; y: number } {
-  const scale = Math.max(sourceWidth / canvasWidth, sourceHeight / canvasHeight);
-  const unzoomedX = (sourceX + 0.5) / scale;
-  const unzoomedY = (sourceY + 0.5) / scale;
+  const scale = fitImageScale(sourceWidth, sourceHeight, canvasWidth, canvasHeight, spacing);
+  const unzoomedX = (sourceX + 0.5) * scale.x;
+  const unzoomedY = (sourceY + 0.5) * scale.y;
   return {
     x: (unzoomedX - canvasWidth / 2) * viewTransform.zoom + canvasWidth / 2 + viewTransform.panX,
     y: (unzoomedY - canvasHeight / 2) * viewTransform.zoom + canvasHeight / 2 + viewTransform.panY,

@@ -31,7 +31,8 @@ export interface Slice extends RadioDensities{
 export interface ImageGeometry {
   uMinMm: number;
   vMinMm: number;
-  spacingMm: number;
+  spacingUMm: number;
+  spacingVMm: number;
 }
 
 export interface RadioDensities {

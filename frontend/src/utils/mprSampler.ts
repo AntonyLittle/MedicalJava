@@ -124,7 +124,9 @@ function setWeight(weights: AxisWeights, k: number, fraction: number, count: num
   const lo = Math.min(count - 1, Math.max(0, Math.floor(fraction)));
   weights.i0[k] = lo;
   weights.i1[k] = Math.min(count - 1, lo + 1);
-  weights.t[k] = Math.min(1, Math.max(0, fraction - lo));
+  // Positions that are meant to sit on a voxel (native-resolution grids) shouldn't pick up rounding noise.
+  const t = fraction - lo;
+  weights.t[k] = t < 1e-9 ? 0 : t > 1 - 1e-9 ? 1 : Math.min(1, Math.max(0, t));
 }
 
 // Weights for output pixels laid out along one voxel axis, computed once per plane instead of per pixel.
@@ -234,13 +236,50 @@ function planeGrid(volume: Volume, orientation: PlaneOrientation, spacing: numbe
   return { widthPixels: inPlane, heightPixels: cells(bounds.min.z, bounds.max.z) };
 }
 
+interface PlaneLayout {
+  grid: PlaneGrid;
+  // Millimetres per output column and per output row.
+  colSpacing: number;
+  rowSpacing: number;
+  // Depth of each row for coronal/sagittal planes; null for axial.
+  rowDepths: number[] | null;
+}
+
+// Coronal/sagittal rows are the stored slices themselves when they are evenly spaced and the scale is a whole number:
+// no interpolation along z, fewer pixels, and the image has non-square pixels that CanvasRenderer stretches.
+function planeLayout(volume: Volume, orientation: PlaneOrientation, spacingScale: number): PlaneLayout {
+  const square = outputSpacing(volume) * spacingScale;
+  if (orientation === 'axial') {
+    return { grid: planeGrid(volume, orientation, square), colSpacing: square, rowSpacing: square, rowDepths: null };
+  }
+
+  const { depths, depthStep, bounds } = volumeInfo(volume);
+  if (depthStep > 0 && Number.isInteger(spacingScale)) {
+    const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = volume.slices[0];
+    const alongX = orientation === 'coronal';
+    const colSpacing = (alongX ? sx : sy) * spacingScale;
+    const colExtent = alongX ? bounds.max.x - bounds.min.x : bounds.max.y - bounds.min.y;
+    const last = depths.length - 1;
+    const rowDepths = Array.from({ length: Math.floor(last / spacingScale) + 1 }, (_, r) => depths[last - r * spacingScale]);
+    return {
+      grid: { widthPixels: Math.floor(colExtent / colSpacing + 1e-9) + 1, heightPixels: rowDepths.length },
+      colSpacing,
+      rowSpacing: depthStep * spacingScale,
+      rowDepths,
+    };
+  }
+
+  const grid = planeGrid(volume, orientation, square);
+  const rowDepths = Array.from({ length: grid.heightPixels }, (_, r) => bounds.max.z - r * square);
+  return { grid, colSpacing: square, rowSpacing: square, rowDepths };
+}
+
 // Calls onRow for every row of the plane's grid with interpolated values (NaN outside the volume).
 // Only the plane position along its dominant normal axis is used; in-plane axes are fixed per orientation.
 function samplePlane(
   volume: Volume,
   viewablePlane: ViewablePlane,
-  grid: PlaneGrid,
-  outSpacing: number,
+  layout: PlaneLayout,
   rowBuf: Float32Array,
   onRow: RowSink
 ): void {
@@ -249,7 +288,8 @@ function samplePlane(
   const { depths, bounds } = volumeInfo(volume);
   const orientation = orientationFromNormal(viewablePlane.normalXyz);
   const position = viewablePlane.positionXyz;
-  const { widthPixels: outWidth, heightPixels: outHeight } = grid;
+  const { widthPixels: outWidth, heightPixels: outHeight } = layout.grid;
+  const outSpacing = layout.colSpacing;
 
   if (orientation === 'axial') {
     const zw = createWeights(1);
@@ -324,7 +364,8 @@ function samplePlane(
   const zw = createWeights(1);
   for (let row = 0; row < outHeight; row++) {
     // Superior (higher z) at the top of the image.
-    setWeight(zw, 0, depthToSliceCoordinate(depths, bounds.max.z - row * outSpacing), slices.length);
+    const rowDepth = layout.rowDepths ? layout.rowDepths[row] : bounds.max.z - row * outSpacing;
+    setWeight(zw, 0, depthToSliceCoordinate(depths, rowDepth), slices.length);
     const rowValid = zw.i0[0] >= 0;
     const tz = zw.t[0];
     const dataA = rowValid ? slices[zw.i0[0]].radiodensities : null;
@@ -389,9 +430,14 @@ function obliqueGrid(volume: Volume, plane: PlaneAxes, spacing: number): Oblique
   };
 }
 
-export function planeImageGeometry(volume: Volume, plane: PlaneAxes, spacingMm: number): ImageGeometry {
+export function planeImageGeometry(
+  volume: Volume,
+  plane: PlaneAxes,
+  spacingUMm: number,
+  spacingVMm: number = spacingUMm
+): ImageGeometry {
   const { uMin, vMin } = projectedExtent(volume, plane);
-  return { uMinMm: uMin, vMinMm: vMin, spacingMm };
+  return { uMinMm: uMin, vMinMm: vMin, spacingUMm, spacingVMm };
 }
 
 // Thickness of a slab centred on the volume that contains every voxel along the given normal.
@@ -529,23 +575,30 @@ function sampleObliquePlane(
 
 interface PlaneSampling {
   grid: PlaneGrid;
-  spacing: number;
+  spacingU: number;
+  spacingV: number;
   run: (plane: ViewablePlane, onRow: RowSink) => void;
 }
 
 // The grid is fixed for a given rotation, so slab sub-planes (shifted along the normal) reuse it.
 function createPlaneSampling(volume: Volume, plane: ViewablePlane, spacingScale: number): PlaneSampling {
-  const spacing = outputSpacing(volume) * spacingScale;
   if (isAxisAligned(plane)) {
-    const grid = planeGrid(volume, orientationFromNormal(plane.normalXyz), spacing);
-    const rowBuf = new Float32Array(grid.widthPixels);
-    return { grid, spacing, run: (p, onRow) => samplePlane(volume, p, grid, spacing, rowBuf, onRow) };
+    const layout = planeLayout(volume, orientationFromNormal(plane.normalXyz), spacingScale);
+    const rowBuf = new Float32Array(layout.grid.widthPixels);
+    return {
+      grid: layout.grid,
+      spacingU: layout.colSpacing,
+      spacingV: layout.rowSpacing,
+      run: (p, onRow) => samplePlane(volume, p, layout, rowBuf, onRow),
+    };
   }
+  const spacing = outputSpacing(volume) * spacingScale;
   const grid = obliqueGrid(volume, plane, spacing);
   const rowBuf = new Float32Array(grid.widthPixels);
   return {
     grid: { widthPixels: grid.widthPixels, heightPixels: grid.heightPixels },
-    spacing,
+    spacingU: spacing,
+    spacingV: spacing,
     run: (p, onRow) => sampleObliquePlane(volume, p, grid, spacing, rowBuf, onRow),
   };
 }
@@ -569,7 +622,7 @@ export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane,
     }
   }
 
-  const { grid, spacing, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
+  const { grid, spacingU, spacingV, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
   const out = new Float32Array(grid.widthPixels * grid.heightPixels).fill(OUTSIDE_VOLUME_VALUE);
   run(viewablePlane, (row, colStart, colEnd, values) => {
     const base = row * grid.widthPixels;
@@ -578,7 +631,7 @@ export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane,
       if (!Number.isNaN(value)) out[base + col] = value;
     }
   });
-  return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacing) };
+  return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacingU, spacingV) };
 }
 
 // A slab computation that yields between units of work so callers can spread it over several frames.
@@ -695,6 +748,20 @@ function* sampleAxialSlabFromSlices(
   return { widthPixels: outWidth, heightPixels: outHeight, radiodensities: accumulated, geometry };
 }
 
+// Keeps every group-th plane, anchored to the absolute index so the set doesn't shift as the slab slides, and gives
+// it the combined coverage of the planes it stands for. Used for cheap previews.
+function decimateWeights(weights: number[], group: number): number[] {
+  if (group <= 1) return weights;
+  const before = Math.floor(group / 2);
+  const decimated = new Array<number>(weights.length).fill(0);
+  for (let j = 0; j < weights.length; j += group) {
+    let sum = 0;
+    for (let i = Math.max(0, j - before); i < Math.min(weights.length, j - before + group); i++) sum += weights[i];
+    decimated[j] = sum / group;
+  }
+  return decimated;
+}
+
 // Coronal/sagittal slabs on the voxel grid: each voxel plane inside the slab is read directly and weighted by how
 // much of it the slab covers. Interpolation weights along the plane are computed once for the whole slab.
 function* sampleSideSlabFromVoxelPlanes(
@@ -714,16 +781,21 @@ function* sampleSideSlabFromVoxelPlanes(
   const planeSpacing = alongY ? sy : sx;
   const centreAlong = alongY ? plane.positionXyz.y : plane.positionXyz.x;
   const positions = Array.from({ length: planeCount }, (_, j) => planeOrigin + j * planeSpacing);
-  const weights = coverageWeights(positions, centreAlong - slab.thicknessMm / 2, centreAlong + slab.thicknessMm / 2);
-  if (weights.every((w) => w === 0)) return undefined;
+  const rawWeights = coverageWeights(positions, centreAlong - slab.thicknessMm / 2, centreAlong + slab.thicknessMm / 2);
+  if (rawWeights.every((w) => w === 0)) return undefined;
+  // The group size depends on thickness only, so it can't change while the slab slides.
+  const group = slab.maxSamples ? Math.max(1, Math.ceil((slab.thicknessMm / planeSpacing + 1) / slab.maxSamples)) : 1;
+  const weights = decimateWeights(rawWeights, group);
 
-  const outSpacing = outputSpacing(volume) * spacingScale;
-  const grid = planeGrid(volume, orientation, outSpacing);
+  const layout = planeLayout(volume, orientation, spacingScale);
+  const { grid } = layout;
   const { widthPixels: outWidth, heightPixels: outHeight } = grid;
   const size = outWidth * outHeight;
 
   // Columns run along x for coronal and y for sagittal; a flat index is colA + the voxel plane's offset.
-  const inPlane = alongY ? axisWeights(outWidth, outSpacing, sx, width) : axisWeights(outWidth, outSpacing, sy, height);
+  const inPlane = alongY
+    ? axisWeights(outWidth, layout.colSpacing, sx, width)
+    : axisWeights(outWidth, layout.colSpacing, sy, height);
   const colStride = alongY ? 1 : width;
   const colA = new Int32Array(outWidth);
   const colB = new Int32Array(outWidth);
@@ -741,7 +813,8 @@ function* sampleSideSlabFromVoxelPlanes(
   const rowT = new Float64Array(outHeight);
   const zw = createWeights(1);
   for (let r = 0; r < outHeight; r++) {
-    setWeight(zw, 0, depthToSliceCoordinate(depths, bounds.max.z - r * outSpacing), slices.length);
+    const rowDepth = layout.rowDepths ? layout.rowDepths[r] : bounds.max.z - r * layout.colSpacing;
+    setWeight(zw, 0, depthToSliceCoordinate(depths, rowDepth), slices.length);
     const valid = zw.i0[0] >= 0;
     rowA[r] = slices[Math.max(0, zw.i0[0])].radiodensities;
     rowT[r] = valid ? zw.t[0] : 0;
@@ -787,7 +860,7 @@ function* sampleSideSlabFromVoxelPlanes(
       }
       if ((r & 7) === 7) yield;
     }
-    return { ...grid, radiodensities: result, geometry: planeImageGeometry(volume, plane, outSpacing) };
+    return { ...grid, radiodensities: result, geometry: planeImageGeometry(volume, plane, layout.colSpacing, layout.rowSpacing) };
   }
 
   const planeValues = new Float32Array(size);
@@ -830,7 +903,7 @@ function* sampleSideSlabFromVoxelPlanes(
     for (let o = 0; o < size; o++) accumulated[o] /= totalWeight;
   }
 
-  return { ...grid, radiodensities: accumulated, geometry: planeImageGeometry(volume, plane, outSpacing) };
+  return { ...grid, radiodensities: accumulated, geometry: planeImageGeometry(volume, plane, layout.colSpacing, layout.rowSpacing) };
 }
 
 function runToCompletion<T>(job: Generator<void, T, void>): T {
@@ -870,7 +943,7 @@ export function* sampleSlabJob(volume: Volume, viewablePlane: ViewablePlane, sla
     if (direct) return direct;
   }
 
-  const { grid, spacing, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
+  const { grid, spacingU, spacingV, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
   const size = grid.widthPixels * grid.heightPixels;
   const initial = slab.mode === 'max' ? -Infinity : slab.mode === 'min' ? Infinity : 0;
   const accumulated = new Float64Array(size).fill(initial);
@@ -919,5 +992,5 @@ export function* sampleSlabJob(volume: Volume, viewablePlane: ViewablePlane, sla
     if (counts[i] === 0) out[i] = OUTSIDE_VOLUME_VALUE;
     else out[i] = slab.mode === 'average' ? accumulated[i] / counts[i] : accumulated[i];
   }
-  return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacing) };
+  return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacingU, spacingV) };
 }

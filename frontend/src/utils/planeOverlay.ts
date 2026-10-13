@@ -98,7 +98,7 @@ export function projectToImage(
 ): { x: number; y: number } {
   const relative = subtract(point, volumeCentre(volume));
   return {
-    x: (dot(relative, camera.rightXyz) - geometry.uMinMm) / geometry.spacingMm,
-    y: (dot(relative, camera.downXyz) - geometry.vMinMm) / geometry.spacingMm,
+    x: (dot(relative, camera.rightXyz) - geometry.uMinMm) / geometry.spacingUMm,
+    y: (dot(relative, camera.downXyz) - geometry.vMinMm) / geometry.spacingVMm,
   };
 }

@@ -1,3 +1,4 @@
+import { parseBinaryVolume } from './binaryVolume';
 import type { Patient, Volume } from './types';
 
 async function getJson<T>(url: string): Promise<T> {
@@ -17,10 +18,10 @@ export function fetchVolumes(patientId: number): Promise<Volume[]> {
 }
 
 export async function fetchVolume(patientId: number, volumeId: number): Promise<Volume> {
-  const volume = await getJson<Volume>(`/api/Patients/${patientId}/Volumes/${volumeId}`);
-  // The JSON arrives as plain number[]; Int16Array is about 4x smaller and faster to index.
-  for (const slice of volume.slices) {
-    slice.radiodensities = Int16Array.from(slice.radiodensities);
+  const url = `/api/Patients/${patientId}/Volumes/${volumeId}/binary`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Request to ${url} failed with status ${response.status}`);
   }
-  return volume;
+  return parseBinaryVolume(await response.arrayBuffer());
 }

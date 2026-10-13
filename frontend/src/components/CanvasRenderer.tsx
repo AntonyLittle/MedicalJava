@@ -1,8 +1,11 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { PointerEvent } from 'react';
 import type { RadioDensities } from '../api/types';
-import { IDENTITY_VIEW_TRANSFORM, sourceToCanvas, type ViewTransform } from '../utils/canvasMath';
+import { fitImageScale, IDENTITY_VIEW_TRANSFORM, sourceToCanvas, type ViewTransform } from '../utils/canvasMath';
 import { mergeRefs } from '../utils/mergeRefs';
+
+// Canvas pixels per source pixel at which the image switches from smoothed to blocky voxels.
+const VOXEL_VIEW_MAGNIFICATION = 4;
 
 // project() maps image pixel coordinates of the radioDensities to canvas coordinates, including pan and zoom.
 export type OverlayDrawer = (
@@ -117,20 +120,23 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
     }
     if (!source) return;
 
-    const { widthPixels, heightPixels } = radioDensities;
-    const scale = Math.max(widthPixels / width, heightPixels / height);
-    const imageScale = viewTransform.zoom / scale;
+    const { widthPixels, heightPixels, geometry } = radioDensities;
+    const spacing = geometry && { u: geometry.spacingUMm, v: geometry.spacingVMm };
+    const imageScale = fitImageScale(widthPixels, heightPixels, width, height, spacing);
 
     context.setTransform(1, 0, 0, 1, 0, 0);
     context.fillStyle = '#000';
     context.fillRect(0, 0, width, height);
-    context.imageSmoothingEnabled = false;
+    // Smooth normally, but show individual voxels once they are magnified enough to be worth seeing.
+    const magnification = Math.min(imageScale.x, imageScale.y) * viewTransform.zoom;
+    context.imageSmoothingEnabled = magnification < VOXEL_VIEW_MAGNIFICATION;
+    context.imageSmoothingQuality = 'high';
     // Zoom about the canvas centre, then pan.
     context.setTransform(
-      imageScale,
+      imageScale.x * viewTransform.zoom,
       0,
       0,
-      imageScale,
+      imageScale.y * viewTransform.zoom,
       (width / 2) * (1 - viewTransform.zoom) + viewTransform.panX,
       (height / 2) * (1 - viewTransform.zoom) + viewTransform.panY
     );
@@ -138,7 +144,7 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
     context.setTransform(1, 0, 0, 1, 0, 0);
 
     drawOverlay?.(context, (imageX, imageY) =>
-      sourceToCanvas(imageX, imageY, widthPixels, heightPixels, width, height, viewTransform)
+      sourceToCanvas(imageX, imageY, widthPixels, heightPixels, width, height, viewTransform, spacing)
     );
   }, [radioDensities, lut, viewTransform, drawOverlay, width, height]);
 
