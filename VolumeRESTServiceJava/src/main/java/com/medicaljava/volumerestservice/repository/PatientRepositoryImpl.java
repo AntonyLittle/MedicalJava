@@ -3,6 +3,7 @@ package com.medicaljava.volumerestservice.repository;
 import com.medicaljava.volumerestservice.model.Patient;
 import com.medicaljava.volumerestservice.model.Slice;
 import com.medicaljava.volumerestservice.model.Volume;
+
 import org.dcm4che3.data.Attributes;
 import org.dcm4che3.data.Fragments;
 import org.dcm4che3.data.Tag;
@@ -12,9 +13,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+import tools.jackson.databind.ObjectMapper;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.file.DirectoryStream;
@@ -31,23 +35,30 @@ public class PatientRepositoryImpl implements PatientRepository {
 
     private static final Logger LOG = LoggerFactory.getLogger(PatientRepositoryImpl.class);
 
-    @Value("${app.data-dir:Data}")
-    private String dataDir;
+    private final String dataDir;
+    private final ObjectMapper objectMapper;
 
-    // Falls back to the repo-root Data directory when running from VolumeRESTServiceJava/.
+    public PatientRepositoryImpl(@Value("${app.data-dir:Data}") String dataDir, ObjectMapper objectMapper) {
+        this.dataDir = dataDir;
+        this.objectMapper = objectMapper;
+    }
+
+    // Falls back to the repo-root Data directory when running from
+    // VolumeRESTServiceJava/.
     private Path dataPath() {
-        Path primary = Paths.get(dataDir);
+        var primary = Paths.get(dataDir);
         if (Files.isDirectory(primary)) {
             return primary;
         }
-        Path fallback = Paths.get("..", "Data");
+        var fallback = Paths.get("..", "Data");
         return Files.isDirectory(fallback) ? fallback : primary;
     }
 
-    // Directory order is filesystem-dependent; sorting keeps the positional ids stable.
+    // Directory order is filesystem-dependent; sorting keeps the positional ids
+    // stable.
     private static List<Path> listSorted(Path dir, DirectoryStream.Filter<Path> filter) throws IOException {
-        List<Path> paths = new ArrayList<>();
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, filter)) {
+        var paths = new ArrayList<Path>();
+        try (var stream = Files.newDirectoryStream(dir, filter)) {
             stream.forEach(paths::add);
         }
         paths.sort(Comparator.comparing(p -> p.getFileName().toString()));
@@ -56,17 +67,17 @@ public class PatientRepositoryImpl implements PatientRepository {
 
     @Override
     public List<Patient> getPatientSummaries() {
-        List<Patient> patients = new ArrayList<>();
+        var patients = new ArrayList<Patient>();
         try {
-            for (Path dir : listSorted(dataPath(), Files::isDirectory)) {
-                Patient patient = new Patient(
+            for (var dir : listSorted(dataPath(), Files::isDirectory)) {
+                var patient = new Patient(
                         patients.size() + 1,
                         dir.getFileName().toString(),
                         new ArrayList<>());
                 patients.add(patient);
             }
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new UncheckedIOException(e);
         }
         return patients;
     }
@@ -81,16 +92,13 @@ public class PatientRepositoryImpl implements PatientRepository {
 
     @Override
     public List<Volume> getVolumeSummaries(int patientId) {
-        Patient patient = getPatientSummaries().stream()
-                .filter(p -> p.patientId() == patientId)
-                .findFirst()
-                .orElseThrow(() -> new NoSuchElementException("Patient not found"));
+        var patient = getPatient(patientId);
 
-        List<Volume> volumes = new ArrayList<>();
-        Path patientDir = dataPath().resolve(patient.name());
+        var volumes = new ArrayList<Volume>();
+        var patientDir = dataPath().resolve(patient.name());
         try {
-            for (Path dir : listSorted(patientDir, Files::isDirectory)) {
-                Volume volume = new Volume(
+            for (var dir : listSorted(patientDir, Files::isDirectory)) {
+                var volume = new Volume(
                         volumes.size() + 1,
                         patientId,
                         dir.getFileName().toString(),
@@ -101,26 +109,26 @@ public class PatientRepositoryImpl implements PatientRepository {
                 volumes.add(volume);
             }
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new UncheckedIOException(e);
         }
         return volumes;
     }
 
     @Override
     public Volume getVolume(int patientId, int volumeId) {
-        Volume volumeSummary = getVolumeSummaries(patientId).stream()
+        var volumeSummary = getVolumeSummaries(patientId).stream()
                 .filter(v -> v.volumeId() == volumeId)
                 .findFirst()
                 .orElseThrow(() -> new NoSuchElementException("Volume not found"));
 
-        Path seriesDir = dataPath()
+        var seriesDir = dataPath()
                 .resolve(volumeSummary.patient().name())
                 .resolve(volumeSummary.name());
 
-        List<Slice> slices = new ArrayList<>();
+        var slices = new ArrayList<Slice>();
         int sliceIndex = 0;
         try {
-            for (Path dicomFile : listSorted(seriesDir, Files::isRegularFile)) {
+            for (var dicomFile : listSorted(seriesDir, Files::isRegularFile)) {
                 try {
                     slices.add(readSlice(dicomFile, patientId, volumeId, sliceIndex));
                 } catch (Exception e) {
@@ -129,26 +137,26 @@ public class PatientRepositoryImpl implements PatientRepository {
                 sliceIndex++;
             }
         } catch (IOException e) {
-            throw new RuntimeException(e);
+            throw new UncheckedIOException(e);
         }
 
-        slices.sort((o1, o2) -> Double.compare(o1.depthPositionMm(), o2.depthPositionMm()));
+        slices.sort(Comparator.comparingDouble(Slice::depthPositionMm));
 
-        var firstSlice = slices.isEmpty() ? null : slices.get(0);
-        var lastSlice = slices.isEmpty() ? null : slices.get(slices.size() - 1);
-
-        volumeSummary = volumeSummary.withSlicesAndSpatial(
+        if (slices.isEmpty()) {
+            return volumeSummary.withSlicesAndSpatial(slices, 0, 0, 0);
+        }
+        var firstSlice = slices.getFirst();
+        var lastSlice = slices.getLast();
+        return volumeSummary.withSlicesAndSpatial(
                 slices,
-                firstSlice == null ? 0 : (int) firstSlice.widthMm(),
-                firstSlice == null ? 0 : (int) firstSlice.heightMm(),
-                (int) ((lastSlice == null ? 0 : lastSlice.depthPositionMm())
-                        - (firstSlice == null ? 0 : firstSlice.depthPositionMm())));
-        return volumeSummary;
+                (int) firstSlice.widthMm(),
+                (int) firstSlice.heightMm(),
+                (int) (lastSlice.depthPositionMm() - firstSlice.depthPositionMm()));
     }
 
     private Slice readSlice(Path dicomFile, int patientId, int volumeId, int sliceIndex) throws IOException {
-        try (DicomInputStream dis = new DicomInputStream(dicomFile.toFile())) {
-            Attributes dataset = dis.readDataset();
+        try (var dis = new DicomInputStream(dicomFile.toFile())) {
+            var dataset = dis.readDataset();
 
             int width = dataset.getInt(Tag.Columns, 0);
             int height = dataset.getInt(Tag.Rows, 0);
@@ -165,19 +173,47 @@ public class PatientRepositoryImpl implements PatientRepository {
             double pixelSpacingX = pixelSpacing[1];
 
             return new Slice(sliceIndex, volumeId, patientId, sliceIndex, width, height,
-                pixelSpacingX * width, pixelSpacingY * height, imagePosition[2],
-                imagePosition[0], imagePosition[1], pixelSpacingX, pixelSpacingY, radiodensities);
+                    pixelSpacingX * width, pixelSpacingY * height, imagePosition[2],
+                    imagePosition[0], imagePosition[1], pixelSpacingX, pixelSpacingY, radiodensities);
         }
+    }
+
+    /**
+     * Same volume as getVolume but without JSON pixel arrays. Layout,
+     * little-endian:
+     * uint32 metadata length N, N bytes of UTF-8 JSON (slices carry empty
+     * radiodensities), zero padding to a
+     * 4-byte boundary, then every slice's width*height int16 pixels back to back in
+     * the JSON slice order.
+     */
+    @Override
+    public StreamingResponseBody getVolumeBinary(int patientId, int volumeId) {
+        var volume = getVolume(patientId, volumeId);
+        var metadata = objectMapper.writeValueAsBytes(volume.withoutPixels());
+
+        return out -> {
+            int headerLength = 4 + metadata.length;
+            var header = ByteBuffer.allocate((headerLength + 3) & ~3).order(ByteOrder.LITTLE_ENDIAN);
+            header.putInt(metadata.length).put(metadata);
+            out.write(header.array());
+
+            for (var slice : volume.slices()) {
+                var pixels = ByteBuffer.allocate(slice.radiodensities().length * Short.BYTES)
+                        .order(ByteOrder.LITTLE_ENDIAN);
+                pixels.asShortBuffer().put(slice.radiodensities());
+                out.write(pixels.array());
+            }
+        };
     }
 
     private static short[] readPixels(Attributes dataset, String transferSyntax, int width, int height)
             throws IOException {
-        int count = width * height;
-        short[] pixels = new short[count];
-
         if (dataset.getValue(Tag.PixelData) instanceof Fragments fragments) {
             return readLosslessJpeg(dataset, fragments, transferSyntax, width, height);
         }
+
+        int count = width * height;
+        var pixels = new short[count];
 
         if (dataset.contains(Tag.PixelData)) {
             int bitsAllocated = dataset.getInt(Tag.BitsAllocated, 16);
@@ -188,7 +224,7 @@ public class PatientRepositoryImpl implements PatientRepository {
             if (bytes.length < count * 2) {
                 throw new IOException("Pixel data too short: " + bytes.length + " bytes for " + count + " pixels");
             }
-            ByteOrder order = dataset.bigEndian() ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN;
+            var order = dataset.bigEndian() ? ByteOrder.BIG_ENDIAN : ByteOrder.LITTLE_ENDIAN;
             ByteBuffer.wrap(bytes).order(order).asShortBuffer().get(pixels);
         } else if (dataset.contains(Tag.FloatPixelData)) {
             float[] values = dataset.getFloats(Tag.FloatPixelData);
@@ -222,7 +258,7 @@ public class PatientRepositoryImpl implements PatientRepository {
         }
 
         // Fragment 0 is the basic offset table.
-        ByteArrayOutputStream jpeg = new ByteArrayOutputStream();
+        var jpeg = new ByteArrayOutputStream();
         for (int i = 1; i < fragments.size(); i++) {
             if (!(fragments.get(i) instanceof byte[] bytes)) {
                 throw new IOException("Pixel data fragment was not loaded");

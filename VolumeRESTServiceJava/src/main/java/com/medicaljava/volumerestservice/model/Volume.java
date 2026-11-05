@@ -14,16 +14,10 @@ public record Volume(
     int depth
 ) {
     public Volume withSlicesAndSpatial(List<Slice> slices, int width, int height, int depth) {
-        return new Volume(
-            this.volumeId,
-            this.patientId,
-            this.name,
-            this.modality,
-            this.patient,
-            slices,
-            width,
-            height,
-            depth
-        );
+        return new Volume(volumeId, patientId, name, modality, patient, slices, width, height, depth);
+    }
+
+    public Volume withoutPixels() {
+        return withSlicesAndSpatial(slices.stream().map(Slice::withoutPixels).toList(), width, height, depth);
     }
 }

@@ -1,8 +1,15 @@
 package com.medicaljava.volumerestservice.controller;
 
+import com.medicaljava.volumerestservice.model.Patient;
 import com.medicaljava.volumerestservice.repository.PatientRepository;
+
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/Patients")
@@ -15,20 +22,12 @@ public class PatientsController {
     }
 
     @GetMapping
-    public ResponseEntity<?> get() {
-        try {
-            return ResponseEntity.ok(repo.getPatientSummaries());
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().build();
-        }
+    public ResponseEntity<List<Patient>> get() {
+        return ResponseEntity.ok(repo.getPatientSummaries());
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<?> get(@PathVariable int id) {
-        try {
-            return ResponseEntity.ok(repo.getPatient(id));
-        } catch (Exception e) {
-            return ResponseEntity.badRequest().build();
-        }
+    public ResponseEntity<Patient> get(@PathVariable int id) {
+        return ResponseEntity.ok(repo.getPatient(id));
     }
 }

@@ -40,7 +40,7 @@ final class JpegLosslessDecoder {
 
     /** Returns the samples as raw 16-bit patterns, row-major. */
     static short[] decode(byte[] jpeg, int expectedWidth, int expectedHeight) throws IOException {
-        JpegLosslessDecoder decoder = new JpegLosslessDecoder(jpeg);
+        var decoder = new JpegLosslessDecoder(jpeg);
         return decoder.run(expectedWidth, expectedHeight);
     }
 
@@ -108,13 +108,13 @@ final class JpegLosslessDecoder {
             if (id > 3) {
                 throw new IOException("Invalid Huffman table id: " + id);
             }
-            int[] counts = new int[17];
+            var counts = new int[17];
             int total = 0;
             for (int len = 1; len <= 16; len++) {
                 counts[len] = u8(p++);
                 total += counts[len];
             }
-            HuffmanTable table = new HuffmanTable();
+            var table = new HuffmanTable();
             table.values = new int[total];
             for (int i = 0; i < total; i++) {
                 table.values[i] = u8(p++);
@@ -147,7 +147,7 @@ final class JpegLosslessDecoder {
         if (predictor < 1 || predictor > 7) {
             throw new IOException("Invalid lossless predictor: " + predictor);
         }
-        HuffmanTable table = tables[tableId & 3];
+        var table = tables[tableId & 3];
         if (table == null) {
             throw new IOException("Missing Huffman table " + tableId);
         }
@@ -160,7 +160,7 @@ final class JpegLosslessDecoder {
         bitCount = 0;
 
         int total = width * height;
-        int[] samples = new int[total];
+        var samples = new int[total];
         int defaultPrediction = 1 << (precision - pointTransform - 1);
         int intervalStart = 0;
 
@@ -194,7 +194,7 @@ final class JpegLosslessDecoder {
             samples[i] = (prediction + decodeDifference(table)) & 0xFFFF;
         }
 
-        short[] result = new short[total];
+        var result = new short[total];
         for (int i = 0; i < total; i++) {
             result[i] = (short) (samples[i] << pointTransform);
         }
