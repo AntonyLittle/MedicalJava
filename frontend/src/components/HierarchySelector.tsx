@@ -25,7 +25,8 @@ export function HierarchySelector({
         <Select
           labelId="patient-label"
           label="Patient"
-          value={selectedPatientId ?? ''}
+          // Only pass ids that are in the option list: a just-uploaded volume is selected before the list reloads.
+          value={patients.some((p) => p.patientId === selectedPatientId) ? selectedPatientId! : ''}
           onChange={(event: SelectChangeEvent<number>) => onPatientChange(Number(event.target.value))}
         >
           {patients.map((patient) => (
@@ -41,7 +42,7 @@ export function HierarchySelector({
         <Select
           labelId="volume-label"
           label="Volume"
-          value={selectedVolumeId ?? ''}
+          value={volumes.some((v) => v.volumeId === selectedVolumeId) ? selectedVolumeId! : ''}
           onChange={(event: SelectChangeEvent<number>) => onVolumeChange(Number(event.target.value))}
         >
           {volumes.map((volume) => (

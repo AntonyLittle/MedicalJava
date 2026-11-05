@@ -21,3 +21,9 @@ Volumes enter the store in two ways:
 `DELETE /api/Patients/{patientId}/Volumes/{id}` and `DELETE /api/Patients/{patientId}` remove volumes and their
 pixel files; deleted data-directory series are not re-imported by later scans. Patient and volume ids are assigned
 at import time and stay stable. Only one service instance should use a store at a time.
+
+The frontend exposes all of this in the toolbar below the patient/volume selectors:
+- **Upload…** – pick files, a folder or zip archives, or drag them onto the dialog. Shows upload progress.
+- **Delete volume** and **Delete patient** – ask for confirmation first.
+- **Rescan data folder** – runs the data directory import again.
+- **Import status** chip – shows when an import is running and lists folders that failed to import.

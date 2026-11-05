@@ -41,3 +41,27 @@ export interface RadioDensities {
   heightPixels: number;
   radiodensities: ArrayLike<number>;
 }
+
+// Summary returned by POST /api/import and included in GET /api/import/status.
+export interface ScanResult {
+  startedAt: string;
+  finishedAt: string;
+  imported: number;
+  updated: number;
+  unchanged: number;
+  excluded: number;
+  failed: number;
+}
+
+export interface ImportFailure {
+  sourcePath: string;
+  fingerprint: string;
+  error: string;
+  failedAt: string;
+}
+
+export interface ImportStatus {
+  running: boolean;
+  lastScan: ScanResult | null;
+  failures: ImportFailure[];
+}

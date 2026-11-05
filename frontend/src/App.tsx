@@ -1,10 +1,13 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { buildMprPlanes, IDENTITY_ROTATION, type Coordinate, type Quaternion, type ViewablePlane } from './utils/canvasMath';
 import { getVolumeBounds, type ProjectionMode } from './utils/mprSampler';
-import { Alert, Box, Button, CircularProgress, Container, Typography } from '@mui/material';
+import { Alert, Box, Button, CircularProgress, Container, Snackbar, Typography } from '@mui/material';
 import { fetchPatients, fetchVolume, fetchVolumes } from './api/client';
-import type { Patient, Volume } from './api/types';
+import type { Patient, ScanResult, Volume } from './api/types';
 import { HierarchySelector } from './components/HierarchySelector';
+import { DataManagementToolbar } from './components/DataManagementToolbar';
+import { useImportStatus } from './hooks/useImportStatus';
+import { formatScanSummary } from './utils/formatScanSummary';
 import { CineVolumeViewer } from './components/CineVolumeViewer';
 import { WindowLevelControls } from './components/WindowLevelControls';
 import { ThinMprVolumeViewer } from './components/ThinMprVolumeViewer';
@@ -15,6 +18,14 @@ import { MprOverviewViewer } from './components/MprOverviewViewer';
 const DEFAULT_WINDOW_LEVEL = 1000;
 const DEFAULT_WINDOW_WIDTH = 2000;
 const DEFAULT_SLAB_THICKNESS_MM = 10;
+
+function describeError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
 
 function App() {
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -40,22 +51,45 @@ function App() {
   const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH);
 
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loadingVolume, setLoadingVolume] = useState(false);
 
-  useEffect(() => {
-    fetchPatients().then(setPatients).catch((e) => setError(String(e)));
+  // Bumped to reload the lists after the store changes, without disturbing the loaded volume.
+  const [patientsVersion, setPatientsVersion] = useState(0);
+  const [volumesVersion, setVolumesVersion] = useState(0);
+  const reloadLists = useCallback(() => {
+    setPatientsVersion((v) => v + 1);
+    setVolumesVersion((v) => v + 1);
+  }, []);
+
+  const { status: importStatus, refresh: refreshImportStatus } = useImportStatus(reloadLists);
+
+  const selectPatient = useCallback((patientId: number | null) => {
+    setSelectedPatientId(patientId);
+    setSelectedVolumeId(null);
+    setVolumes([]);
   }, []);
 
   useEffect(() => {
-    setVolumes([]);
-    setSelectedVolumeId(null);
-    setVolume(null);
-    setSliceIndex(0);
+    let cancelled = false;
+    fetchPatients()
+      .then((p) => !cancelled && setPatients(p))
+      .catch((e) => !cancelled && setError(describeError(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [patientsVersion]);
 
+  useEffect(() => {
     if (selectedPatientId == null) return;
-
-    fetchVolumes(selectedPatientId).then(setVolumes).catch((e) => setError(String(e)));
-  }, [selectedPatientId]);
+    let cancelled = false;
+    fetchVolumes(selectedPatientId)
+      .then((v) => !cancelled && setVolumes(v))
+      .catch((e) => !cancelled && setError(describeError(e)));
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPatientId, volumesVersion]);
 
   useEffect(() => {
     setVolume(null);
@@ -63,9 +97,11 @@ function App() {
 
     if (selectedPatientId == null || selectedVolumeId == null) return;
 
+    let cancelled = false;
     setLoadingVolume(true);
     fetchVolume(selectedPatientId, selectedVolumeId)
       .then((v) => {
+        if (cancelled) return;
         setVolume(v);
         setMprRotation(IDENTITY_ROTATION);
         if (v.slices.length > 0) {
@@ -73,9 +109,52 @@ function App() {
           setMprPosition({ x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 });
         }
       })
-      .catch((e) => setError(String(e)))
-      .finally(() => setLoadingVolume(false));
+      .catch((e) => !cancelled && setError(describeError(e)))
+      .finally(() => !cancelled && setLoadingVolume(false));
+    return () => {
+      cancelled = true;
+    };
   }, [selectedPatientId, selectedVolumeId]);
+
+  const selectedPatient = patients.find((p) => p.patientId === selectedPatientId) ?? null;
+  const selectedVolume = volumes.find((v) => v.volumeId === selectedVolumeId) ?? null;
+
+  const handleUploaded = useCallback(
+    (uploaded: Volume[]) => {
+      reloadLists();
+      const [first] = uploaded;
+      if (first) {
+        if (first.patientId !== selectedPatientId) selectPatient(first.patientId);
+        setSelectedVolumeId(first.volumeId);
+      }
+      setNotice(`Uploaded ${plural(uploaded.length, 'volume')}`);
+    },
+    [reloadLists, selectPatient, selectedPatientId]
+  );
+
+  const handleVolumeDeleted = useCallback((deleted: Volume) => {
+    setSelectedVolumeId((current) => (current === deleted.volumeId ? null : current));
+    setVolumesVersion((v) => v + 1);
+    setNotice(`Deleted volume ${deleted.name}`);
+  }, []);
+
+  const handlePatientDeleted = useCallback(
+    (deleted: Patient) => {
+      if (deleted.patientId === selectedPatientId) selectPatient(null);
+      setPatientsVersion((v) => v + 1);
+      setNotice(`Deleted patient ${deleted.name}`);
+    },
+    [selectPatient, selectedPatientId]
+  );
+
+  const handleRescanned = useCallback(
+    (result: ScanResult) => {
+      reloadLists();
+      refreshImportStatus();
+      setNotice(`Rescan finished: ${formatScanSummary(result)}`);
+    },
+    [reloadLists, refreshImportStatus]
+  );
 
   return (
     <Container sx={{ py: 4 }}>
@@ -92,11 +171,34 @@ function App() {
       <HierarchySelector
         patients={patients}
         selectedPatientId={selectedPatientId}
-        onPatientChange={setSelectedPatientId}
+        onPatientChange={selectPatient}
         volumes={volumes}
         selectedVolumeId={selectedVolumeId}
         onVolumeChange={setSelectedVolumeId}
       />
+
+      <DataManagementToolbar
+        selectedPatient={selectedPatient}
+        selectedVolume={selectedVolume}
+        patientVolumeCount={volumes.length}
+        importStatus={importStatus}
+        onUploaded={handleUploaded}
+        onVolumeDeleted={handleVolumeDeleted}
+        onPatientDeleted={handlePatientDeleted}
+        onRescanned={handleRescanned}
+        onError={setError}
+      />
+
+      <Snackbar
+        open={notice != null}
+        autoHideDuration={6000}
+        onClose={(_, reason) => reason !== 'clickaway' && setNotice(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+      >
+        <Alert severity="success" variant="filled" onClose={() => setNotice(null)}>
+          {notice}
+        </Alert>
+      </Snackbar>
 
       <Box sx={{ mt: 4 }}>
         {loadingVolume && <CircularProgress />}
