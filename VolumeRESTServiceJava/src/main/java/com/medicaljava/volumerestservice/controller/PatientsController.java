@@ -4,6 +4,7 @@ import com.medicaljava.volumerestservice.model.Patient;
 import com.medicaljava.volumerestservice.repository.PatientRepository;
 
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -29,5 +30,11 @@ public class PatientsController {
     @GetMapping("/{id}")
     public ResponseEntity<Patient> get(@PathVariable int id) {
         return ResponseEntity.ok(repo.getPatient(id));
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<Void> delete(@PathVariable int id) {
+        repo.deletePatient(id);
+        return ResponseEntity.noContent().build();
     }
 }

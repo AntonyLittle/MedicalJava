@@ -18,4 +18,8 @@ public interface PatientRepository {
     Volume getVolume(int patientId, int volumeId);
 
     StreamingResponseBody getVolumeBinary(int patientId, int volumeId);
+
+    void deletePatient(int patientId);
+
+    void deleteVolume(int patientId, int volumeId);
 }
