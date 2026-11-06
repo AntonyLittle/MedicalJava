@@ -14,6 +14,7 @@ import { ThinMprVolumeViewer } from './components/ThinMprVolumeViewer';
 import { ThickMprVolumeViewer } from './components/ThickMprVolumeViewer';
 import { ThickMprControls } from './components/ThickMprControls';
 import { MprOverviewViewer } from './components/MprOverviewViewer';
+import { VolumeRenderViewer } from './components/VolumeRenderViewer';
 
 const DEFAULT_WINDOW_LEVEL = 1000;
 const DEFAULT_WINDOW_WIDTH = 2000;
@@ -222,6 +223,17 @@ function App() {
                 windowWidth={windowWidth}
                 onWindowLevelChange={setWindowLevel}
                 onWindowWidthChange={setWindowWidth}
+              />
+            </Box>
+            <Box sx={{ mb: 2 }}>
+              <VolumeRenderViewer
+                volume={volume}
+                planes={mprPlanes}
+                windowLevel={windowLevel}
+                windowWidth={windowWidth}
+                onWindowLevelChange={setWindowLevel}
+                onWindowWidthChange={setWindowWidth}
+                onMprPositionChange={setMprPosition}
               />
             </Box>
             <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2 }}>

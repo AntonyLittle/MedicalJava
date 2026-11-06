@@ -27,3 +27,25 @@ The frontend exposes all of this in the toolbar below the patient/volume selecto
 - **Delete volume** and **Delete patient** – ask for confirmation first.
 - **Rescan data folder** – runs the data directory import again.
 - **Import status** chip – shows when an import is running and lists folders that failed to import.
+
+## 3D volume rendering
+
+The frontend renders the loaded volume in 3D with WebGL2 ray casting (`frontend/src/render3d/`, shown by
+`VolumeRenderViewer`). The volume is uploaded once as a half-float 3D texture. Uneven slice spacing is resampled to an
+even grid, and axes larger than the GPU's 3D texture limit are decimated. No server changes are involved.
+
+- **Modes** – *VR* (colour/opacity transfer-function presets: bone, soft tissue, skin, lung, vessels, with lighting),
+  *Surface* (shaded isosurface at a HU threshold), and *MIP*, *MinIP* and *Avg* projections, which use the shared
+  window level/width.
+- **Clipping** – a clip box per patient axis, and *Cut at MPR plane*, which removes everything on one side of the
+  axial, coronal or sagittal MPR plane and follows it as it moves.
+- **MPR planes** – the three MPR planes are outlined in the 3D view, and shift+click moves the MPR crosshair to the
+  point under the cursor.
+- **Interaction** – left drag rotates, middle drag pans, right drag or the wheel zooms, and left+right drag adjusts
+  the active mode (VR: preset shift horizontally, opacity vertically; Surface: threshold; projections: window
+  level/width). Double-click resets the view. The view is drawn at half resolution while it changes and refined
+  once input pauses. Empty bricks of 8³ voxels are skipped.
+
+The store keeps raw CT pixel values (the DICOM rescale is not applied), so presets and the surface threshold are
+specified in HU and converted assuming the usual intercept of −1024. For other data, use the preset *Shift* and
+*Opacity* controls.
