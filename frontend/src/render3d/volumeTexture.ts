@@ -5,11 +5,13 @@ import {
   dilateBrickStats,
   planVolumeGrid,
   type BrickStats,
+  type GridSource,
   type VolumeGrid,
 } from './volumeGrid';
 
 export interface GpuVolume {
   grid: VolumeGrid;
+  source: GridSource;
   bricks: BrickStats;
   texture: WebGLTexture;
 }
@@ -18,7 +20,7 @@ export interface GpuVolume {
 // temporary is a single float slice. Brick value ranges for empty-space skipping are gathered on the way.
 export function uploadVolume(gl: WebGL2RenderingContext, volume: Volume): GpuVolume {
   const maxSize = gl.getParameter(gl.MAX_3D_TEXTURE_SIZE) as number;
-  const { grid, fillSlice } = planVolumeGrid(volume, maxSize);
+  const { grid, source, fillSlice } = planVolumeGrid(volume, maxSize);
   const [nx, ny, nz] = grid.dims;
   const bricks = createBrickStats(grid);
 
@@ -44,5 +46,5 @@ export function uploadVolume(gl: WebGL2RenderingContext, volume: Volume): GpuVol
   }
   dilateBrickStats(bricks);
 
-  return { grid, bricks, texture };
+  return { grid, source, bricks, texture };
 }

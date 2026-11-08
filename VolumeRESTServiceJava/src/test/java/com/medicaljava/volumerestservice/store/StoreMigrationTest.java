@@ -50,7 +50,8 @@ class StoreMigrationTest {
 
             var store = new VolumeStore(dataSource, jdbc, new DataSourceTransactionManager(dataSource), paths);
 
-            assertThat(jdbc.sql("PRAGMA user_version").query(Integer.class).single()).isEqualTo(1);
+            assertThat(jdbc.sql("PRAGMA user_version").query(Integer.class).single())
+                    .isEqualTo(VolumeStore.SCHEMA_VERSION);
             var legacy = store.getVolume(1, 5).volume();
             assertThat(legacy.formatVersion()).isZero();
             assertThat(legacy.rowDirection()).containsExactly(1, 0, 0);

@@ -42,10 +42,11 @@ public class VolumeImporter {
     private static final String DEFAULT_MODALITY = "CT";
 
     /**
-     * Version of the decoding applied to stored volumes. 1 = rescale applied and native orientation kept; data
-     * directory volumes stored by an older version are re-imported by the next scan.
+     * Version of the decoding applied to stored volumes. 1 = rescale applied and native orientation kept; 2 = DICOM
+     * study, frame of reference and instance UIDs kept. Data directory volumes stored by an older version are
+     * re-imported by the next scan.
      */
-    public static final int FORMAT_VERSION = 1;
+    public static final int FORMAT_VERSION = 2;
 
     private final VolumeStore store;
     private final StorePaths paths;
@@ -185,7 +186,9 @@ public class VolumeImporter {
             var volume = new NewVolume(name, modality, info.seriesInstanceUid(), sourcePath, part.key(), fingerprint,
                     (int) first.widthMm(), (int) first.heightMm(),
                     (int) (last.depthPositionMm() - first.depthPositionMm()),
-                    part.rowDirection(), part.columnDirection(), values, FORMAT_VERSION, slices, pixelBytes);
+                    part.rowDirection(), part.columnDirection(), values, FORMAT_VERSION, slices, pixelBytes,
+                    info.studyInstanceUid(), info.frameOfReferenceUid(),
+                    decoded.stream().map(DecodedSlice::source).toList());
             return store.saveVolume(owner, volume, tmp, replaceVolumeId);
         } finally {
             VolumeStore.deleteQuietly(tmp);

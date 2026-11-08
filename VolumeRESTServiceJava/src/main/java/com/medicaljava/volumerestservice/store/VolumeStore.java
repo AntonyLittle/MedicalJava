@@ -3,6 +3,7 @@ package com.medicaljava.volumerestservice.store;
 import com.medicaljava.volumerestservice.model.Patient;
 import com.medicaljava.volumerestservice.model.Slice;
 import com.medicaljava.volumerestservice.model.Volume;
+import com.medicaljava.volumerestservice.repository.DicomSeriesReader.SourceImage;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +51,7 @@ public class VolumeStore {
     private static final Logger LOG = LoggerFactory.getLogger(VolumeStore.class);
 
     /** Store schema version, kept in SQLite's user_version. */
-    static final int SCHEMA_VERSION = 1;
+    static final int SCHEMA_VERSION = 2;
 
     /** Volume metadata without pixels, ready to be stored alongside a pixel file. */
     public record NewVolume(
@@ -68,7 +69,11 @@ public class VolumeStore {
             PixelValues.Mapping values,
             int formatVersion,
             List<Slice> slices,
-            long pixelBytes) {}
+            long pixelBytes,
+            String studyInstanceUid,
+            String frameOfReferenceUid,
+            // Parallel to slices; null when unknown.
+            List<SourceImage> sources) {}
 
     /** Who the volume belongs to: an existing patient id, or a name to look up / create. */
     public record PatientRef(Integer patientId, String name, String dicomPatientId) {
@@ -88,6 +93,10 @@ public class VolumeStore {
     public record SourceState(int volumeId, String fingerprint, int formatVersion) {}
 
     public record ImportFailure(String sourcePath, String fingerprint, String error, String failedAt) {}
+
+    /** What a DICOM object derived from a volume needs to reference it. Any UID may be null when unknown. */
+    public record DicomReferences(String patientName, String patientId, String studyInstanceUid,
+            String seriesInstanceUid, String frameOfReferenceUid, String modality, List<SourceImage> sources) {}
 
     // Nested rather than method-local: two local records with the same name make the Eclipse compiler (used by the
     // VS Code debugger) write a duplicate InnerClasses entry, which the JVM rejects with a ClassFormatError.
@@ -165,6 +174,51 @@ public class VolumeStore {
         return new StoredVolume(volume, paths.pixelFile(row.pixelFile()), row.pixelBytes());
     }
 
+    public DicomReferences dicomReferences(int patientId, int volumeId) {
+        var references = jdbc.sql("""
+                SELECT p.name, p.dicom_patient_id, v.study_instance_uid, v.series_instance_uid,
+                    v.frame_of_reference_uid, v.modality
+                FROM volumes v JOIN patients p ON p.id = v.patient_id WHERE v.id = ? AND v.patient_id = ?""")
+                .param(volumeId)
+                .param(patientId)
+                .query((rs, n) -> new DicomReferences(rs.getString(1), rs.getString(2), rs.getString(3),
+                        rs.getString(4), rs.getString(5), rs.getString(6), List.of()))
+                .optional()
+                .orElseThrow(() -> new NoSuchElementException("Volume not found"));
+        var sources = jdbc.sql("SELECT sop_class_uid, sop_instance_uid FROM slices WHERE volume_id = ? ORDER BY position")
+                .param(volumeId)
+                .query((rs, n) -> new SourceImage(rs.getString(1), rs.getString(2)))
+                .list();
+        return new DicomReferences(references.patientName(), references.patientId(), references.studyInstanceUid(),
+                references.seriesInstanceUid(), references.frameOfReferenceUid(), references.modality(), sources);
+    }
+
+    /**
+     * Identifies the voxel grid of a volume (slice sizes, spacing, positions and orientation, rounded to well below a
+     * voxel), so labelmaps written for it can tell whether a re-import moved the voxels.
+     */
+    public static String geometryHash(Volume volume) {
+        var text = new StringBuilder();
+        for (var d : volume.rowDirection()) {
+            text.append(String.format(java.util.Locale.ROOT, "%.5f,", d));
+        }
+        for (var d : volume.columnDirection()) {
+            text.append(String.format(java.util.Locale.ROOT, "%.5f,", d));
+        }
+        for (var s : volume.slices()) {
+            text.append(String.format(java.util.Locale.ROOT, "|%d,%d,%.4f,%.4f,%.3f,%.3f,%.3f", s.widthPixels(),
+                    s.heightPixels(), s.pixelSpacingXMm(), s.pixelSpacingYMm(), s.positionXMm(), s.positionYMm(),
+                    s.positionZMm()));
+        }
+        try {
+            var digest = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(text.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(digest, 0, 16);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     public boolean hasSeries(int patientId, String seriesInstanceUid) {
         return jdbc.sql("SELECT COUNT(*) FROM volumes WHERE patient_id = ? AND series_instance_uid = ?")
                 .param(patientId)
@@ -228,7 +282,8 @@ public class VolumeStore {
                                 source_path = ?, source_part = ?, source_fingerprint = ?,
                                 row_x = ?, row_y = ?, row_z = ?, column_x = ?, column_y = ?, column_z = ?,
                                 value_slope = ?, value_intercept = ?, value_units = ?, min_value = ?, max_value = ?,
-                                format_version = ?, updated_at = CURRENT_TIMESTAMP
+                                format_version = ?, study_instance_uid = ?, frame_of_reference_uid = ?,
+                                updated_at = CURRENT_TIMESTAMP
                             WHERE id = ?""")
                             .params(volumeParams(patientId, v, pixelFileName, replaceVolumeId))
                             .update();
@@ -239,8 +294,9 @@ public class VolumeStore {
                             INSERT INTO volumes (patient_id, name, modality, series_instance_uid, width, height,
                                 depth, slice_count, pixel_file, pixel_bytes, source_path, source_part,
                                 source_fingerprint, row_x, row_y, row_z, column_x, column_y, column_z,
-                                value_slope, value_intercept, value_units, min_value, max_value, format_version)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""")
+                                value_slope, value_intercept, value_units, min_value, max_value, format_version,
+                                study_instance_uid, frame_of_reference_uid)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""")
                             .params(volumeParams(patientId, v, pixelFileName, null))
                             .update();
                     id = lastInsertId();
@@ -248,15 +304,17 @@ public class VolumeStore {
 
                 int position = 0;
                 for (var s : v.slices()) {
+                    var source = v.sources() == null ? new SourceImage(null, null) : v.sources().get(position);
                     jdbc.sql("""
                             INSERT INTO slices (volume_id, position, slice_index, width_px, height_px, width_mm,
                                 height_mm, depth_position_mm, origin_x_mm, origin_y_mm, spacing_x_mm, spacing_y_mm,
-                                position_x_mm, position_y_mm, position_z_mm)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""")
+                                position_x_mm, position_y_mm, position_z_mm, sop_class_uid, sop_instance_uid)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""")
                             .params(id, position++, s.index(), s.widthPixels(), s.heightPixels(), s.widthMm(),
                                     s.heightMm(), s.depthPositionMm(), s.originXMm(), s.originYMm(),
                                     s.pixelSpacingXMm(), s.pixelSpacingYMm(),
-                                    s.positionXMm(), s.positionYMm(), s.positionZMm())
+                                    s.positionXMm(), s.positionYMm(), s.positionZMm(),
+                                    source.sopClassUid(), source.sopInstanceUid())
                             .update();
                 }
 
@@ -299,6 +357,7 @@ public class VolumeStore {
     }
 
     public void deleteVolume(int patientId, int volumeId) {
+        var labelFiles = new ArrayList<String>();
         var pixelFile = write(() -> {
             var row = jdbc.sql("""
                     SELECT pixel_file, source_path, source_part FROM volumes WHERE id = ? AND patient_id = ?""")
@@ -310,24 +369,30 @@ public class VolumeStore {
             if (row.sourcePath() != null) {
                 excludeSource(row.sourcePath(), row.sourcePart());
             }
+            labelFiles.addAll(labelFilesOfVolumes("volume_id = ?", volumeId));
             jdbc.sql("DELETE FROM volumes WHERE id = ?").param(volumeId).update();
             return row.pixelFile();
         });
         deleteQuietly(paths.pixelFile(pixelFile));
+        labelFiles.forEach(f -> deleteQuietly(paths.labelFile(f)));
     }
 
     /** Removes a volume whose data-directory source no longer produces it; unlike a delete, it isn't excluded. */
     public void removeVolume(int volumeId) {
+        var labelFiles = new ArrayList<String>();
         var pixelFile = write(() -> {
             var file = jdbc.sql("SELECT pixel_file FROM volumes WHERE id = ?").param(volumeId)
                     .query(String.class).single();
+            labelFiles.addAll(labelFilesOfVolumes("volume_id = ?", volumeId));
             jdbc.sql("DELETE FROM volumes WHERE id = ?").param(volumeId).update();
             return file;
         });
         deleteQuietly(paths.pixelFile(pixelFile));
+        labelFiles.forEach(f -> deleteQuietly(paths.labelFile(f)));
     }
 
     public void deletePatient(int patientId) {
+        var labelFiles = new ArrayList<String>();
         var pixelFiles = write(() -> {
             getPatient(patientId);
             jdbc.sql("""
@@ -338,15 +403,19 @@ public class VolumeStore {
                     });
             var files = jdbc.sql("SELECT pixel_file FROM volumes WHERE patient_id = ?")
                     .param(patientId).query(String.class).list();
+            labelFiles.addAll(labelFilesOfVolumes(
+                    "volume_id IN (SELECT id FROM volumes WHERE patient_id = ?)", patientId));
             jdbc.sql("DELETE FROM patients WHERE id = ?").param(patientId).update();
             return files;
         });
         pixelFiles.forEach(f -> deleteQuietly(paths.pixelFile(f)));
+        labelFiles.forEach(f -> deleteQuietly(paths.labelFile(f)));
     }
 
     // ---- helpers ----
 
-    private <T> T write(Supplier<T> work) {
+    /** Runs work in a transaction, serialised with every other store write. */
+    <T> T write(Supplier<T> work) {
         writeLock.lock();
         try {
             return tx.execute(status -> work.get());
@@ -370,8 +439,13 @@ public class VolumeStore {
     }
 
     // Only valid inside a transaction, where the same connection performed the INSERT.
-    private int lastInsertId() {
+    int lastInsertId() {
         return jdbc.sql("SELECT last_insert_rowid()").query(Integer.class).single();
+    }
+
+    private List<String> labelFilesOfVolumes(String condition, int param) {
+        return jdbc.sql("SELECT label_file FROM segmentations WHERE " + condition).param(param)
+                .query(String.class).list();
     }
 
     private void excludeSource(String sourcePath, String sourcePart) {
@@ -392,6 +466,8 @@ public class VolumeStore {
         params.addAll(List.of(row[0], row[1], row[2], column[0], column[1], column[2]));
         params.addAll(List.of(values.slope(), values.intercept(), values.units(), values.minValue(),
                 values.maxValue(), v.formatVersion()));
+        params.add(v.studyInstanceUid());
+        params.add(v.frameOfReferenceUid());
         if (id != null) {
             params.add(id);
         }
@@ -408,8 +484,8 @@ public class VolumeStore {
     }
 
     /**
-     * Upgrades a version 0 store in place. Runs before schema.sql, on one connection: SQLite can't drop the old
-     * UNIQUE (source_path) constraint, so the volumes table is rebuilt with foreign keys off.
+     * Upgrades an older store in place, one version at a time. Runs before schema.sql, on one connection. Version 1
+     * rebuilds the volumes table with foreign keys off, as SQLite can't drop the old UNIQUE (source_path) constraint.
      */
     private void migrate(DataSource dataSource) {
         try (var connection = dataSource.getConnection(); var statement = connection.createStatement()) {
@@ -422,17 +498,36 @@ public class VolumeStore {
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'volumes'")) {
                 existing = rs.getInt(1) > 0;
             }
-            if (!existing || version >= 1) {
+            if (!existing) {
                 return;
             }
+            if (version < 1) {
+                migrateStep(connection, 1, () -> {
+                    ScriptUtils.executeSqlScript(connection, new ClassPathResource("store/migrate-v1.sql"));
+                    fillValueRanges(connection);
+                });
+            }
+            if (version < 2) {
+                migrateStep(connection, 2, () ->
+                        ScriptUtils.executeSqlScript(connection, new ClassPathResource("store/migrate-v2.sql")));
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Could not upgrade the store", e);
+        }
+    }
 
-            LOG.info("Upgrading store {} to version 1", paths.database());
+    private interface MigrationWork {
+        void run() throws SQLException;
+    }
+
+    private void migrateStep(Connection connection, int version, MigrationWork work) throws SQLException {
+        LOG.info("Upgrading store {} to version {}", paths.database(), version);
+        try (var statement = connection.createStatement()) {
             statement.execute("PRAGMA foreign_keys = OFF");
             try {
                 connection.setAutoCommit(false);
-                ScriptUtils.executeSqlScript(connection, new ClassPathResource("store/migrate-v1.sql"));
-                fillValueRanges(connection);
-                statement.execute("PRAGMA user_version = 1");
+                work.run();
+                statement.execute("PRAGMA user_version = " + version);
                 connection.commit();
             } catch (SQLException | RuntimeException e) {
                 connection.rollback();
@@ -441,8 +536,6 @@ public class VolumeStore {
                 connection.setAutoCommit(true);
                 statement.execute("PRAGMA foreign_keys = ON");
             }
-        } catch (SQLException e) {
-            throw new IllegalStateException("Could not upgrade the store", e);
         }
     }
 
@@ -500,12 +593,19 @@ public class VolumeStore {
                     deleteQuietly(p);
                 });
             }
+            var labels = new HashSet<>(jdbc.sql("SELECT label_file FROM segmentations").query(String.class).list());
+            try (var files = Files.list(paths.segmentations())) {
+                files.filter(p -> !labels.contains(p.getFileName().toString())).forEach(p -> {
+                    LOG.warn("Removing orphaned label file {}", p);
+                    deleteQuietly(p);
+                });
+            }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
-    static void deleteQuietly(Path path) {
+    public static void deleteQuietly(Path path) {
         try {
             Files.deleteIfExists(path);
         } catch (IOException e) {

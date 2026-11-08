@@ -3,6 +3,7 @@ import type { PointerEvent } from 'react';
 import { Alert, Box } from '@mui/material';
 import type { Volume } from '../api/types';
 import { useOrbitCamera } from '../hooks/useOrbitCamera';
+import { useSegmentation } from '../hooks/segmentationContext';
 import { useSharedGpu } from '../hooks/useSharedGpu';
 import { usePointerDragMode, type DragStarter } from '../hooks/usePointerDragMode';
 import { useWlwwDrag } from '../hooks/useWlwwDrag';
@@ -80,6 +81,7 @@ const DEFAULT_SETTINGS: VolumeRenderSettings = {
   cutPlane: 'none',
   flipCut: false,
   showMprPlanes: true,
+  labelTint: false,
 };
 
 // windowLevel/windowWidth are in stored values, like the other viewers'.
@@ -141,6 +143,15 @@ export function VolumeRenderViewer({
     setSettings((s) => ({ ...s, isoValue: null, clipBox: FULL_CLIP_BOX }));
   }
 
+  const segmentation = useSegmentation();
+  const session = segmentation?.session?.volume === volume ? segmentation.session : null;
+  // Read on every render: the context re-renders this view whenever the session changes.
+  const labelVersion = session?.labelmap.version;
+  const labelColors = session?.colorTable();
+  const surfaceOpacity = segmentation?.display.surfaceOpacity ?? 1;
+  // Segment surfaces need a segmentation; without one the view falls back to VR.
+  const mode = settings.mode === 'labels' && !session ? 'dvr' : settings.mode;
+
   const hounsfield = isHounsfield(volume);
   const units = valueUnits(volume);
   const valueRange = useMemo(() => realRange(volume), [volume]);
@@ -167,8 +178,7 @@ export function VolumeRenderViewer({
 
   // The window only affects the greyscale modes, and volume rendering of data without Hounsfield units (whose
   // opacity ramps across the window); ignoring it otherwise avoids needless re-renders.
-  const usesWindow =
-    settings.mode === 'mip' || settings.mode === 'minip' || settings.mode === 'average' || (!hounsfield && settings.mode === 'dvr');
+  const usesWindow = mode === 'mip' || mode === 'minip' || mode === 'average' || (!hounsfield && mode === 'dvr');
   const renderWindowLevel = usesWindow ? windowLevel : 0;
   const renderWindowWidth = usesWindow ? windowWidth : 1;
 
@@ -188,9 +198,16 @@ export function VolumeRenderViewer({
     [cutViewablePlane, settings.flipCut]
   );
 
+  const labels = useMemo(() => {
+    if (!session || (mode !== 'labels' && !(mode === 'dvr' && settings.labelTint))) return null;
+    // The labels are edited in place; a new version re-renders the view as they are painted.
+    void labelVersion;
+    return { labelmap: session.labelmap, colors: labelColors!, opacity: surfaceOpacity, tint: settings.labelTint };
+  }, [session, mode, settings.labelTint, surfaceOpacity, labelVersion, labelColors]);
+
   const renderParams = useMemo<RenderParams>(
     () => ({
-      mode: settings.mode,
+      mode,
       camera: frame,
       lut,
       opacityScale: settings.opacityScale,
@@ -203,8 +220,9 @@ export function VolumeRenderViewer({
       cutPlane,
       stepFactor: STEP_FACTOR[settings.quality],
       skipEmpty: true,
+      labels,
     }),
-    [settings, frame, lut, renderWindowLevel, renderWindowWidth, cutPlane, volume, isoValue]
+    [mode, settings, frame, lut, renderWindowLevel, renderWindowWidth, cutPlane, volume, isoValue, labels]
   );
 
   // The renderer is created lazily in draw(); a restored context needs a new one.
@@ -275,7 +293,7 @@ export function VolumeRenderViewer({
       return (clientX, clientY) => {
         const dx = clientX - startX;
         const dy = clientY - startY;
-        if (start.mode === 'dvr') {
+        if (mode === 'dvr') {
           updateSettings({
             shiftHu: Math.round(clamp(start.shiftHu + dx * HU_PER_PIXEL, MIN_SHIFT_HU, MAX_SHIFT_HU)),
             opacityScale: clamp(
@@ -284,13 +302,13 @@ export function VolumeRenderViewer({
               MAX_OPACITY_SCALE
             ),
           });
-        } else if (start.mode === 'iso') {
+        } else if (mode === 'iso') {
           const value = clamp(startIso + dx * perPixel, minValue, maxValue);
           updateSettings({ isoValue: hounsfield ? Math.round(value) : value });
         }
       };
     },
-    [settings, isoValue, valueRange, hounsfield, updateSettings]
+    [settings, mode, isoValue, valueRange, hounsfield, updateSettings]
   );
   const handleDrag = usePointerDragMode({
     1: orbit.startRotate,
@@ -307,17 +325,18 @@ export function VolumeRenderViewer({
       const x = ((e.clientX - rect.left) / rect.width) * WIDTH;
       const y = ((e.clientY - rect.top) / rect.height) * HEIGHT;
       const point = pickPoint(volume, grid, rayForPixel(frame, x, y, WIDTH, HEIGHT), {
-        mode: settings.mode,
+        mode,
         lut,
         opacityScale: settings.opacityScale,
         isoValue: toStoredValue(volume, isoValue),
         clipBox: settings.clipBox,
         cutPlane,
         perspective: frame.perspectiveDistanceMm > 0,
+        labels,
       });
       if (point) onMprPositionChange(point);
     },
-    [volume, frame, settings, isoValue, lut, cutPlane, onMprPositionChange]
+    [volume, frame, mode, settings, isoValue, lut, cutPlane, labels, onMprPositionChange]
   );
 
   // A shift+click picks; the rest of that press is ignored so it doesn't turn into a rotation.
@@ -381,7 +400,10 @@ export function VolumeRenderViewer({
         )}
       </Box>
       <VolumeRenderControls
-        settings={settings}
+        settings={{ ...settings, mode }}
+        hasSegmentation={!!session}
+        surfaceOpacity={surfaceOpacity}
+        onSurfaceOpacityChange={(opacity) => segmentation?.setDisplay({ surfaceOpacity: opacity })}
         isoValue={isoValue}
         valueRange={valueRange}
         units={units}

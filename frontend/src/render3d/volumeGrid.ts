@@ -30,8 +30,17 @@ export interface BrickStats {
   max: Float32Array;
 }
 
+// Which source voxel each grid voxel is nearest to: grid voxel (i, j, k) shows column i·strideX and row j·strideY of
+// slice nearestSlice[k]. Labels are resampled this way, as they can't be interpolated.
+export interface GridSource {
+  strideX: number;
+  strideY: number;
+  nearestSlice: Int32Array;
+}
+
 export interface GridSampler {
   grid: VolumeGrid;
+  source: GridSource;
   // Writes slice k of the grid (dims[0] * dims[1] values, row-major) into out.
   fillSlice: (k: number, out: Float32Array) => void;
 }
@@ -151,7 +160,19 @@ export function planVolumeGrid(volume: Volume, maxSize: number): GridSampler {
     }
   };
 
-  return { grid, fillSlice };
+  const nearestSlice = new Int32Array(nz);
+  for (let k = 0; k < nz; k++) {
+    if (direct) {
+      nearestSlice[k] = k;
+      continue;
+    }
+    const z = k * spacing.z;
+    const lower = lowerIndex(depths, z);
+    const upper = Math.min(count - 1, lower + 1);
+    nearestSlice[k] = Math.abs(depths[upper] - z) < Math.abs(z - depths[lower]) ? upper : lower;
+  }
+
+  return { grid, source: { strideX, strideY, nearestSlice }, fillSlice };
 }
 
 export function createBrickStats(grid: VolumeGrid): BrickStats {

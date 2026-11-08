@@ -1,4 +1,6 @@
 import type { Volume } from '../api/types';
+import type { Labelmap } from '../segmentation/labelmap';
+import { voxelAt, voxelSpace } from '../segmentation/voxelSpace';
 import type { Coordinate } from '../utils/canvasMath';
 import { sampleVolumeAt } from '../utils/volumeGeometry';
 import { add, scale, type Ray } from './camera';
@@ -19,10 +21,13 @@ export interface PickParams {
   clipBox: ClipBox;
   cutPlane: CutPlane | null;
   perspective: boolean;
+  // For 'labels' mode: the labels and their RGBA colours (alpha 0 = hidden).
+  labels?: { labelmap: Labelmap; colors: Uint8Array } | null;
 }
 
 // The point the user sees under the ray: the first opaque-enough sample (DVR), the surface (iso), the brightest or
-// darkest sample (MIP/MinIP), or the middle of the visible segment (average). Null when the ray misses.
+// darkest sample (MIP/MinIP), the first visible segment (labels), or the middle of the visible part of the ray
+// (average). Null when the ray misses.
 export function pickPoint(volume: Volume, grid: VolumeGrid, ray: Ray, params: PickParams): Coordinate | null {
   const interval = rayInterval(ray, grid, params.clipBox, params.cutPlane, params.perspective);
   if (!interval) return null;
@@ -31,6 +36,19 @@ export function pickPoint(volume: Volume, grid: VolumeGrid, ray: Ray, params: Pi
   if (params.mode === 'average') return pointAt((near + far) / 2);
 
   const step = Math.min(grid.spacing.x, grid.spacing.y, grid.spacing.z);
+  if (params.mode === 'labels') {
+    if (!params.labels) return null;
+    const { labelmap, colors } = params.labels;
+    const space = voxelSpace(volume);
+    for (let t = near; t <= far; t += step / 2) {
+      const point = pointAt(t);
+      const voxel = voxelAt(space, point);
+      if (!voxel) continue;
+      const label = labelmap.data[labelmap.index(voxel.i, voxel.j, voxel.k)];
+      if (label !== 0 && colors[label * 4 + 3] > 0) return point;
+    }
+    return null;
+  }
   let transmittance = 1;
   let bestT = NaN;
   let bestValue = params.mode === 'minip' ? Infinity : -Infinity;

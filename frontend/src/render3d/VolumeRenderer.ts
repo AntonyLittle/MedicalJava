@@ -1,4 +1,5 @@
 import type { Volume } from '../api/types';
+import type { Labelmap } from '../segmentation/labelmap';
 import type { CameraFrame } from './camera';
 import { clippedBox, type ClipBox, type CutPlane } from './clipping';
 import { createProgram, uniformLocator } from './gl';
@@ -10,10 +11,21 @@ import type { GpuVolume } from './volumeTexture';
 import vertexSource from './shaders/raycast.vert?raw';
 import fragmentSource from './shaders/raycast.frag?raw';
 
-export type RenderMode = 'dvr' | 'mip' | 'minip' | 'average' | 'iso';
+export type RenderMode = 'dvr' | 'mip' | 'minip' | 'average' | 'iso' | 'labels';
 
 // Keep in sync with the MODE_* constants in raycast.frag.
-const MODE_INDEX: Record<RenderMode, number> = { dvr: 0, mip: 1, minip: 2, average: 3, iso: 4 };
+const MODE_INDEX: Record<RenderMode, number> = { dvr: 0, mip: 1, minip: 2, average: 3, iso: 4, labels: 5 };
+
+// A segmentation to show: surfaces of its visible segments ('labels' mode), or a tint of VR samples.
+export interface RenderLabels {
+  labelmap: Labelmap;
+  // RGBA per label; alpha 0 hides the label.
+  colors: Uint8Array;
+  // Opacity of the segment surfaces, 0..1.
+  opacity: number;
+  // Colours VR samples inside visible segments.
+  tint: boolean;
+}
 
 export interface RenderParams {
   mode: RenderMode;
@@ -33,6 +45,7 @@ export interface RenderParams {
   // Ray step as a fraction of the smallest voxel spacing.
   stepFactor: number;
   skipEmpty: boolean;
+  labels: RenderLabels | null;
 }
 
 interface OccupancyInputs {
@@ -100,7 +113,12 @@ export class VolumeRenderer {
   private readonly vertexArray: WebGLVertexArrayObject;
   private readonly lutTexture: WebGLTexture;
   private readonly occupancyTexture: WebGLTexture;
+  private readonly labelColorTexture: WebGLTexture;
+  // Bound in place of a labelmap when there is none, as an integer sampler needs an integer texture.
+  private readonly noLabelsTexture: WebGLTexture;
+  private source: Volume | null = null;
   private volume: GpuVolume | null = null;
+  private uploadedColors: Uint8Array | null = null;
   private uploadedLut: TransferLut | null = null;
   private occupancyInputs: OccupancyInputs | null = null;
 
@@ -125,6 +143,19 @@ export class VolumeRenderer {
     gl.bindTexture(gl.TEXTURE_3D, this.occupancyTexture);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+    this.labelColorTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.labelColorTexture);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, 256, 1);
+
+    this.noLabelsTexture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_3D, this.noLabelsTexture);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texStorage3D(gl.TEXTURE_3D, 1, gl.R8UI, 1, 1, 1);
+    gl.texSubImage3D(gl.TEXTURE_3D, 0, 0, 0, 0, 1, 1, 1, gl.RED_INTEGER, gl.UNSIGNED_BYTE, new Uint8Array(1));
   }
 
   get grid() {
@@ -134,6 +165,7 @@ export class VolumeRenderer {
   // The shared context uploads the volume (once, for every view) and rethrows a failed upload.
   setVolume(volume: Volume | null): void {
     const uploaded = volume ? this.gpu.volume(volume) : null;
+    this.source = volume;
     if (uploaded === this.volume) return;
     this.volume = uploaded;
     this.occupancyInputs = null;
@@ -174,7 +206,15 @@ export class VolumeRenderer {
     if (!volume) return;
 
     const [windowLow, windowHigh] = windowRange(params);
-    const skipEmpty = params.skipEmpty && params.mode !== 'average';
+    // Bricks are skipped by value, which says nothing about labels.
+    const skipEmpty = params.skipEmpty && params.mode !== 'average' && params.mode !== 'labels';
+    const labels = params.labels && this.source ? this.gpu.labels(this.source, params.labels.labelmap) : null;
+    if (params.labels && params.labels.colors !== this.uploadedColors) {
+      gl.bindTexture(gl.TEXTURE_2D, this.labelColorTexture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 256, 1, gl.RGBA, gl.UNSIGNED_BYTE, params.labels.colors);
+      this.uploadedColors = params.labels.colors;
+    }
     if (params.mode === 'dvr') this.updateLut(params.lut);
     if (skipEmpty) {
       this.updateOccupancy(volume, {
@@ -205,6 +245,15 @@ export class VolumeRenderer {
     gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_3D, this.occupancyTexture);
     gl.uniform1i(u('uOccupancy'), 2);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_3D, labels?.texture ?? this.noLabelsTexture);
+    gl.uniform1i(u('uLabels'), 3);
+    gl.activeTexture(gl.TEXTURE4);
+    gl.bindTexture(gl.TEXTURE_2D, this.labelColorTexture);
+    gl.uniform1i(u('uLabelColors'), 4);
+    gl.uniform1i(u('uLabelTint'), labels && params.labels?.tint ? 1 : 0);
+    gl.uniform1f(u('uLabelOpacity'), params.labels?.opacity ?? 1);
+    gl.activeTexture(gl.TEXTURE0);
 
     gl.uniform1i(u('uMode'), MODE_INDEX[params.mode]);
     gl.uniform3f(u('uCamTarget'), camera.target.x, camera.target.y, camera.target.z);
@@ -253,6 +302,8 @@ export class VolumeRenderer {
     this.volume = null;
     gl.deleteTexture(this.lutTexture);
     gl.deleteTexture(this.occupancyTexture);
+    gl.deleteTexture(this.labelColorTexture);
+    gl.deleteTexture(this.noLabelsTexture);
     gl.deleteVertexArray(this.vertexArray);
     gl.deleteProgram(this.program);
   }

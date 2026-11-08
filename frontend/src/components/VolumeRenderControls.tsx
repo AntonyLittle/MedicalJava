@@ -33,6 +33,8 @@ export interface VolumeRenderSettings {
   cutPlane: PlaneOrientation | 'none';
   flipCut: boolean;
   showMprPlanes: boolean;
+  // VR colours samples inside visible segments.
+  labelTint: boolean;
 }
 
 export const MIN_SHIFT_HU = -500;
@@ -50,6 +52,10 @@ interface VolumeRenderControlsProps {
   units: string;
   // Presets need Hounsfield units; other data ramps opacity across the shared window instead.
   hounsfield: boolean;
+  // Segment modes need a loaded segmentation.
+  hasSegmentation: boolean;
+  surfaceOpacity: number;
+  onSurfaceOpacityChange: (opacity: number) => void;
   onChange: (update: Partial<VolumeRenderSettings>) => void;
   onResetView: () => void;
 }
@@ -76,6 +82,9 @@ export function VolumeRenderControls({
   valueRange,
   units,
   hounsfield,
+  hasSegmentation,
+  surfaceOpacity,
+  onSurfaceOpacityChange,
   onChange,
   onResetView,
 }: VolumeRenderControlsProps) {
@@ -103,8 +112,31 @@ export function VolumeRenderControls({
           <ToggleButton value="mip">MIP</ToggleButton>
           <ToggleButton value="minip">MinIP</ToggleButton>
           <ToggleButton value="average">Avg</ToggleButton>
+          <ToggleButton value="labels" disabled={!hasSegmentation} title="Surfaces of the visible segments">
+            Seg
+          </ToggleButton>
         </ToggleButtonGroup>
       </Section>
+
+      {mode === 'labels' && (
+        <Section title={`Segment opacity: ${Math.round(surfaceOpacity * 100)}%`}>
+          <Slider
+            size="small"
+            min={0.1}
+            max={1}
+            step={0.05}
+            value={surfaceOpacity}
+            onChange={(_, value) => onSurfaceOpacityChange(value as number)}
+          />
+        </Section>
+      )}
+
+      {mode === 'dvr' && hasSegmentation && (
+        <FormControlLabel
+          control={<Switch size="small" checked={settings.labelTint} onChange={(_, checked) => onChange({ labelTint: checked })} />}
+          label="Colour by segment"
+        />
+      )}
 
       {mode === 'dvr' && !hounsfield && (
         <>

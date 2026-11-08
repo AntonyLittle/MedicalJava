@@ -1,5 +1,14 @@
 import { parseBinaryVolume } from './binaryVolume';
-import type { ImportStatus, Patient, ScanResult, Volume } from './types';
+import type {
+  ImportStatus,
+  Patient,
+  ScanResult,
+  Segment,
+  Segmentation,
+  SegmentationJob,
+  SegmentationModelList,
+  Volume,
+} from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -105,4 +114,92 @@ export function uploadVolumes({ patientId, files, onProgress, signal }: UploadOp
     signal?.addEventListener('abort', () => xhr.abort(), { once: true });
     xhr.send(form);
   });
+}
+
+// ---- segmentations ----
+
+function segmentationsUrl(patientId: number, volumeId: number): string {
+  return `/api/Patients/${patientId}/Volumes/${volumeId}/Segmentations`;
+}
+
+function jsonInit(method: string, body: unknown, revision?: number): RequestInit {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (revision !== undefined) headers['If-Match'] = `"${revision}"`;
+  return { method, headers, body: JSON.stringify(body) };
+}
+
+export function fetchSegmentations(patientId: number, volumeId: number): Promise<Segmentation[]> {
+  return getJson<Segmentation[]>(segmentationsUrl(patientId, volumeId));
+}
+
+export function createSegmentation(
+  patientId: number,
+  volumeId: number,
+  name: string,
+  segments: Segment[]
+): Promise<Segmentation> {
+  return getJson<Segmentation>(segmentationsUrl(patientId, volumeId), jsonInit('POST', { name, segments }));
+}
+
+export function updateSegmentation(
+  segmentation: Segmentation,
+  changes: { name?: string; segments?: Segment[] }
+): Promise<Segmentation> {
+  const url = `${segmentationsUrl(segmentation.patientId, segmentation.volumeId)}/${segmentation.segmentationId}`;
+  return getJson<Segmentation>(url, jsonInit('PATCH', changes, segmentation.revision));
+}
+
+export async function deleteSegmentation(segmentation: Segmentation): Promise<void> {
+  const url = `${segmentationsUrl(segmentation.patientId, segmentation.volumeId)}/${segmentation.segmentationId}`;
+  await (await request(url, { method: 'DELETE' })).text();
+}
+
+// The browser undoes the server's gzip Content-Encoding.
+export async function fetchLabels(segmentation: Segmentation): Promise<Uint8Array> {
+  const url = `${segmentationsUrl(segmentation.patientId, segmentation.volumeId)}/${segmentation.segmentationId}/labels`;
+  return new Uint8Array(await (await request(url)).arrayBuffer());
+}
+
+// Labels are mostly background, so they are gzipped for the upload (typically a hundredth of the size).
+export async function saveLabels(segmentation: Segmentation, labels: Uint8Array): Promise<Segmentation> {
+  const url = `${segmentationsUrl(segmentation.patientId, segmentation.volumeId)}/${segmentation.segmentationId}/labels`;
+  const compressed = await new Response(
+    new Blob([labels as BlobPart]).stream().pipeThrough(new CompressionStream('gzip'))
+  ).arrayBuffer();
+  return getJson<Segmentation>(url, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Encoding': 'gzip',
+      'If-Match': `"${segmentation.revision}"`,
+    },
+    body: compressed,
+  });
+}
+
+export function dicomSegUrl(segmentation: Segmentation): string {
+  return `${segmentationsUrl(segmentation.patientId, segmentation.volumeId)}/${segmentation.segmentationId}/dicom`;
+}
+
+export function importDicomSeg(patientId: number, volumeId: number, file: File): Promise<Segmentation> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  return getJson<Segmentation>(`${segmentationsUrl(patientId, volumeId)}/dicom`, { method: 'POST', body: form });
+}
+
+export function fetchSegmentationModels(): Promise<SegmentationModelList> {
+  return getJson<SegmentationModelList>('/api/segmentation/models');
+}
+
+export function startAutoSegmentation(
+  patientId: number,
+  volumeId: number,
+  model: string,
+  name?: string
+): Promise<SegmentationJob> {
+  return getJson<SegmentationJob>(`${segmentationsUrl(patientId, volumeId)}/auto`, jsonInit('POST', { model, name }));
+}
+
+export function fetchSegmentationJob(jobId: string): Promise<SegmentationJob> {
+  return getJson<SegmentationJob>(`/api/segmentation/jobs/${encodeURIComponent(jobId)}`);
 }

@@ -23,7 +23,18 @@ public final class DicomSeriesReader {
             String seriesInstanceUid,
             String seriesDescription,
             String seriesNumber,
-            String modality) {}
+            String modality,
+            String studyInstanceUid,
+            String frameOfReferenceUid) {
+
+        public SeriesInfo(String patientName, String patientId, String seriesInstanceUid, String seriesDescription,
+                String seriesNumber, String modality) {
+            this(patientName, patientId, seriesInstanceUid, seriesDescription, seriesNumber, modality, null, null);
+        }
+    }
+
+    /** The DICOM instance a slice was decoded from; either UID may be null. */
+    public record SourceImage(String sopClassUid, String sopInstanceUid) {}
 
     /** Patient-space (LPS) orientation and position of an image: ImageOrientationPatient and ImagePositionPatient. */
     public record ImagePlane(double[] rowDirection, double[] columnDirection, double[] position) {}
@@ -65,7 +76,13 @@ public final class DicomSeriesReader {
      * The slice's volumeId and patientId are 0; they are assigned when the volume is stored. Its radiodensities
      * hold the raw pixel bits, to be interpreted with {@code encoding}.
      */
-    public record DecodedSlice(SeriesInfo info, Slice slice, ImagePlane plane, PixelEncoding encoding) {}
+    public record DecodedSlice(SeriesInfo info, Slice slice, ImagePlane plane, PixelEncoding encoding,
+            SourceImage source) {
+
+        public DecodedSlice(SeriesInfo info, Slice slice, ImagePlane plane, PixelEncoding encoding) {
+            this(info, slice, plane, encoding, new SourceImage(null, null));
+        }
+    }
 
     private static final double[] AXIAL_ROW = {1, 0, 0};
     private static final double[] AXIAL_COLUMN = {0, 1, 0};
@@ -105,8 +122,15 @@ public final class DicomSeriesReader {
                     dataset.getString(Tag.SeriesInstanceUID),
                     dataset.getString(Tag.SeriesDescription),
                     dataset.getString(Tag.SeriesNumber),
-                    dataset.getString(Tag.Modality));
-            return new DecodedSlice(info, slice, plane, pixelEncoding(dataset));
+                    dataset.getString(Tag.Modality),
+                    dataset.getString(Tag.StudyInstanceUID),
+                    dataset.getString(Tag.FrameOfReferenceUID));
+            var source = new SourceImage(
+                    dataset.getString(Tag.SOPClassUID, dis.getFileMetaInformation() == null ? null
+                            : dis.getFileMetaInformation().getString(Tag.MediaStorageSOPClassUID)),
+                    dataset.getString(Tag.SOPInstanceUID, dis.getFileMetaInformation() == null ? null
+                            : dis.getFileMetaInformation().getString(Tag.MediaStorageSOPInstanceUID)));
+            return new DecodedSlice(info, slice, plane, pixelEncoding(dataset), source);
         }
     }
 

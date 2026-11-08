@@ -34,6 +34,7 @@ interface CanvasRendererProps {
   onPointerDown?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerMove?: (e: PointerEvent<HTMLCanvasElement>) => void;
   onPointerUp?: (e: PointerEvent<HTMLCanvasElement>) => void;
+  onPointerLeave?: () => void;
   onDoubleClick?: () => void;
   borderColor?: string;
   drawOverlay?: OverlayDrawer;
@@ -116,7 +117,7 @@ function paintSourceImage(previous: SourceImage | null, densities: RadioDensitie
 }
 
 export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>(function CanvasRenderer(
-  { width, height, radioDensities, image, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onDoubleClick, borderColor, drawOverlay },
+  { width, height, radioDensities, image, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onPointerLeave, onDoubleClick, borderColor, drawOverlay },
   forwardedRef
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -198,6 +199,8 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onPointerLeave={onPointerLeave}
     />
   );
 });

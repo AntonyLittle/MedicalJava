@@ -10,6 +10,7 @@ const int MODE_MIP = 1;
 const int MODE_MINIP = 2;
 const int MODE_AVERAGE = 3;
 const int MODE_ISO = 4;
+const int MODE_LABELS = 5;
 
 in vec2 vNdc;
 out vec4 outColor;
@@ -61,6 +62,13 @@ uniform float uWindowHigh;
 uniform float uIsoValue;
 uniform vec3 uIsoColor;
 
+// Segmentation labels on the volume's grid (nearest voxel), and RGBA per label (alpha 0 = hidden). Labels mode draws
+// the surfaces of visible segments with uLabelOpacity; uLabelTint colours VR samples inside visible segments.
+uniform highp usampler3D uLabels;
+uniform sampler2D uLabelColors;
+uniform bool uLabelTint;
+uniform float uLabelOpacity;
+
 float sampleAt(vec3 v) {
   return texture(uVolume, (v + 0.5) / uDims).r;
 }
@@ -107,6 +115,48 @@ float skipBrick(vec3 voxelOrigin, vec3 voxelDir, float t, ivec3 brick) {
 
 bool brickEmpty(vec3 v) {
   return texelFetch(uOccupancy, brickAt(v), 0).r == 0u;
+}
+
+uint labelAt(vec3 v) {
+  ivec3 p = ivec3(floor(v + 0.5));
+  if (any(lessThan(p, ivec3(0))) || any(greaterThanEqual(p, ivec3(uDims)))) return 0u;
+  return texelFetch(uLabels, p, 0).r;
+}
+
+vec4 labelColor(uint label) {
+  return texelFetch(uLabelColors, ivec2(int(label), 0), 0);
+}
+
+float isLabel(ivec3 p, uint label) {
+  if (any(lessThan(p, ivec3(0))) || any(greaterThanEqual(p, ivec3(uDims)))) return 0.0;
+  return texelFetch(uLabels, p, 0).r == label ? 1.0 : 0.0;
+}
+
+// The segment's indicator (1 inside, 0 outside) interpolated trilinearly: its 0.5 level is a smooth surface.
+float labelIndicator(vec3 v, uint label) {
+  vec3 base = floor(v);
+  vec3 f = v - base;
+  ivec3 p = ivec3(base);
+  float x00 = mix(isLabel(p, label), isLabel(p + ivec3(1, 0, 0), label), f.x);
+  float x10 = mix(isLabel(p + ivec3(0, 1, 0), label), isLabel(p + ivec3(1, 1, 0), label), f.x);
+  float x01 = mix(isLabel(p + ivec3(0, 0, 1), label), isLabel(p + ivec3(1, 0, 1), label), f.x);
+  float x11 = mix(isLabel(p + ivec3(0, 1, 1), label), isLabel(p + ivec3(1, 1, 1), label), f.x);
+  return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+
+vec3 labelDifference(vec3 v, uint label, float h) {
+  return vec3(
+    labelIndicator(v + vec3(h, 0.0, 0.0), label) - labelIndicator(v - vec3(h, 0.0, 0.0), label),
+    labelIndicator(v + vec3(0.0, h, 0.0), label) - labelIndicator(v - vec3(0.0, h, 0.0), label),
+    labelIndicator(v + vec3(0.0, 0.0, h), label) - labelIndicator(v - vec3(0.0, 0.0, h), label)
+  ) / (2.0 * h);
+}
+
+// Central differences over one and two voxels together, which smooths the stair steps of voxel labels.
+vec3 labelGradient(vec3 v, uint label) {
+  vec3 perVoxel = 0.5 * (labelDifference(v, label, 1.0) + labelDifference(v, label, 2.0));
+  // Scaled up so shade() treats it as a real surface rather than a flat region.
+  return transpose(mat3(uPatientToVoxel)) * perVoxel * 100.0;
 }
 
 float hash(vec2 p) {
@@ -166,6 +216,11 @@ void main() {
         float alphaPerMm = min(0.999, sampleColor.a * uOpacityScale);
         float alpha = 1.0 - pow(1.0 - alphaPerMm, uStepMm);
         vec3 color = sampleColor.rgb;
+        if (uLabelTint) {
+          uint label = labelAt(v);
+          vec4 tint = labelColor(label);
+          if (label != 0u && tint.a > 0.0) color = mix(color, tint.rgb, 0.7);
+        }
         if (uShading > 0.0) {
           vec3 gradient = gradientAt(v);
           float edge = smoothstep(5.0, 60.0, length(gradient));
@@ -175,6 +230,40 @@ void main() {
         accumulated.a += (1.0 - accumulated.a) * alpha;
         if (accumulated.a > 0.98) break;
       }
+      t += uStepMm;
+    }
+    outColor = vec4(accumulated.rgb, 1.0);
+  } else if (uMode == MODE_LABELS) {
+    // Each entry into a visible segment is a surface; transparent surfaces let the ones behind show through.
+    vec4 accumulated = vec4(0.0);
+    uint current = labelAt(voxelOrigin + voxelDir * t);
+    float previousT = t;
+    if (current != 0u && labelColor(current).a > 0.0) {
+      // The ray starts inside a segment (at a clip plane): show the cut face, flat.
+      accumulated = vec4(labelColor(current).rgb * 0.8 * uLabelOpacity, uLabelOpacity);
+    }
+    for (int i = 0; i < uMaxSteps; i++) {
+      if (t > range.y || accumulated.a > 0.98) break;
+      vec3 v = voxelOrigin + voxelDir * t;
+      uint label = labelAt(v);
+      if (label != current) {
+        current = label;
+        vec4 color = labelColor(label);
+        if (label != 0u && color.a > 0.0) {
+          float lo = previousT;
+          float hi = t;
+          for (int j = 0; j < 6; j++) {
+            float mid = 0.5 * (lo + hi);
+            if (labelIndicator(voxelOrigin + voxelDir * mid, label) >= 0.5) hi = mid;
+            else lo = mid;
+          }
+          vec3 hit = voxelOrigin + voxelDir * hi;
+          vec3 shaded = shade(color.rgb, labelGradient(hit, label), viewDir, 0.25, 0.25);
+          accumulated.rgb += (1.0 - accumulated.a) * uLabelOpacity * shaded;
+          accumulated.a += (1.0 - accumulated.a) * uLabelOpacity;
+        }
+      }
+      previousT = t;
       t += uStepMm;
     }
     outColor = vec4(accumulated.rgb, 1.0);

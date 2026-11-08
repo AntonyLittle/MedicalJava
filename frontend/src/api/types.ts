@@ -82,3 +82,61 @@ export interface ImportStatus {
   lastScan: ScanResult | null;
   failures: ImportFailure[];
 }
+
+// One structure of a segmentation: the voxels labelled `label` (1–255). algorithmType is the DICOM SEG
+// SegmentAlgorithmType.
+export type SegmentAlgorithmType = 'MANUAL' | 'SEMIAUTOMATIC' | 'AUTOMATIC';
+
+export interface Segment {
+  label: number;
+  name: string;
+  // "#rrggbb"
+  color: string;
+  algorithmType: SegmentAlgorithmType;
+}
+
+// A labelmap on a volume's voxel grid. stale: the volume was re-imported with another geometry since the labels were
+// written. revision increases with every change; send it back as If-Match.
+export interface Segmentation {
+  segmentationId: number;
+  volumeId: number;
+  patientId: number;
+  name: string;
+  // 'manual', 'auto:<model>' or 'dicom-seg'
+  source: string;
+  revision: number;
+  createdAt: string;
+  modifiedAt: string;
+  voxelCount: number;
+  stale: boolean;
+  segments: Segment[];
+}
+
+export interface SegmentationModel {
+  id: string;
+  name: string;
+  description: string;
+  available: boolean;
+  unavailableReason: string | null;
+}
+
+export interface SegmentationModelList {
+  workerUrl: string;
+  workerAvailable: boolean;
+  error: string | null;
+  models: SegmentationModel[];
+}
+
+export interface SegmentationJob {
+  jobId: string;
+  patientId: number;
+  volumeId: number;
+  model: string;
+  name: string | null;
+  state: 'queued' | 'running' | 'succeeded' | 'failed';
+  message: string | null;
+  segmentationId: number | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}

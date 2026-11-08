@@ -1,4 +1,6 @@
 import type { Volume } from '../api/types';
+import type { Labelmap } from '../segmentation/labelmap';
+import { createLabelTexture, updateLabelTexture, type GpuLabels } from './labelTexture';
 import { uploadVolume, type GpuVolume } from './volumeTexture';
 
 const CONTEXT_ATTRIBUTES: WebGLContextAttributes = {
@@ -21,6 +23,7 @@ export class SharedGpu {
   private source: Volume | null = null;
   private uploaded: GpuVolume | null = null;
   private uploadError: Error | null = null;
+  private uploadedLabels: GpuLabels | null = null;
   private readonly resources = new Map<(gl: WebGL2RenderingContext) => unknown, unknown>();
   private version = 0;
   private readonly listeners = new Set<Listener>();
@@ -34,6 +37,7 @@ export class SharedGpu {
       this.source = null;
       this.uploaded = null;
       this.uploadError = null;
+      this.uploadedLabels = null;
       this.resources.clear();
       this.version++;
       this.listeners.forEach((listener) => listener());
@@ -60,6 +64,7 @@ export class SharedGpu {
       return this.uploaded!;
     }
     if (this.uploaded) this.gl.deleteTexture(this.uploaded.texture);
+    this.releaseLabels();
     this.uploaded = null;
     this.source = volume;
     this.uploadError = null;
@@ -70,6 +75,24 @@ export class SharedGpu {
       throw this.uploadError;
     }
     return this.uploaded;
+  }
+
+  // The labelmap's texture, on the grid of the volume's texture: created on first use, then kept up to date with
+  // the labelmap's edits. Only one labelmap is on the GPU at a time.
+  labels(volume: Volume, labelmap: Labelmap): GpuLabels {
+    const uploaded = this.volume(volume);
+    if (this.uploadedLabels?.labelmap !== labelmap) {
+      this.releaseLabels();
+      this.uploadedLabels = createLabelTexture(this.gl, uploaded, labelmap);
+    } else {
+      updateLabelTexture(this.gl, uploaded, this.uploadedLabels);
+    }
+    return this.uploadedLabels;
+  }
+
+  private releaseLabels(): void {
+    if (this.uploadedLabels) this.gl.deleteTexture(this.uploadedLabels.texture);
+    this.uploadedLabels = null;
   }
 
   // A GL object shared by every view, created on first use (and again after a context restore).

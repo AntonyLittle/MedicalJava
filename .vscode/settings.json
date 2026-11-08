@@ -8,5 +8,9 @@
             "path": "/usr/lib/jvm/java-25-openjdk/",
             "default": true
         }
-    ]
+    ],
+    "chat.tools.terminal.autoApprove": {
+        "java": true,
+        "mvn -q -o test": true
+    }
 }

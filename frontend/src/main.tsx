@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material'
 import './index.css'
 import App from './App.tsx'
+import { SegmentationProvider } from './components/SegmentationProvider'
 
 const theme = createTheme();
 
@@ -10,7 +11,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <App />
+      <SegmentationProvider>
+        <App />
+      </SegmentationProvider>
     </ThemeProvider>
   </StrictMode>,
 )

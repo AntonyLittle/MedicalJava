@@ -1,0 +1,6 @@
+# Built-in "ct-basic" model (body, lungs and bone by thresholds).
+numpy>=1.26
+scipy>=1.11
+# Optional: TotalSegmentator models (117 CT structures). Needs PyTorch; a GPU makes it practical.
+# TotalSegmentator>=2.4
+# nibabel>=5.2

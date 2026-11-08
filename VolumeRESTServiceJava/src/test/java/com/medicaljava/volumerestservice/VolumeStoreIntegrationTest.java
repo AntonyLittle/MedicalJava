@@ -1,5 +1,7 @@
 package com.medicaljava.volumerestservice;
 
+import com.medicaljava.volumerestservice.store.VolumeImporter;
+
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
@@ -126,7 +128,7 @@ class VolumeStoreIntegrationTest {
         assertThat(full.get("valueUnits").asString()).isEmpty();
         assertThat(full.get("valueSlope").asDouble()).isEqualTo(1);
         assertThat(full.get("minValue").asDouble()).isEqualTo(1);
-        assertThat(full.get("formatVersion").asInt()).isEqualTo(1);
+        assertThat(full.get("formatVersion").asInt()).isEqualTo(VolumeImporter.FORMAT_VERSION);
     }
 
     @Test

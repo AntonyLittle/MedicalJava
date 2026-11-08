@@ -42,6 +42,9 @@ CREATE TABLE IF NOT EXISTS volumes (
     min_value           REAL    NOT NULL DEFAULT 0,
     max_value           REAL    NOT NULL DEFAULT 0,
     format_version      INTEGER NOT NULL DEFAULT 0,
+    -- DICOM identifiers of the source series, kept for DICOM SEG export (NULL when unknown).
+    study_instance_uid     TEXT,
+    frame_of_reference_uid TEXT,
     created_at          TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (source_path, source_part)
@@ -67,6 +70,8 @@ CREATE TABLE IF NOT EXISTS slices (
     position_x_mm     REAL    NOT NULL DEFAULT 0,
     position_y_mm     REAL    NOT NULL DEFAULT 0,
     position_z_mm     REAL    NOT NULL DEFAULT 0,
+    sop_class_uid     TEXT,
+    sop_instance_uid  TEXT,
     PRIMARY KEY (volume_id, position)
 ) WITHOUT ROWID;
 
@@ -84,3 +89,33 @@ CREATE TABLE IF NOT EXISTS import_failures (
     error       TEXT NOT NULL,
     failed_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Labelmaps on a volume's voxel grid: segmentations/{label_file} is the gzip of one uint8 label per voxel (0 =
+-- background), slices back to back in the volume's slice order, voxel_count bytes uncompressed. geometry_hash is
+-- the volume geometry the labels were written for; a re-import that changes the geometry makes them stale.
+-- revision increases with every change and is the segmentation's ETag.
+CREATE TABLE IF NOT EXISTS segmentations (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    volume_id     INTEGER NOT NULL REFERENCES volumes (id) ON DELETE CASCADE,
+    name          TEXT    NOT NULL,
+    -- 'manual', 'auto:<model>' or 'dicom-seg'.
+    source        TEXT    NOT NULL DEFAULT 'manual',
+    label_file    TEXT    NOT NULL,
+    voxel_count   INTEGER NOT NULL,
+    geometry_hash TEXT    NOT NULL,
+    revision      INTEGER NOT NULL DEFAULT 1,
+    created_at    TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    modified_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS segmentations_volume ON segmentations (volume_id);
+
+-- algorithm_type is the DICOM SEG SegmentAlgorithmType: MANUAL, SEMIAUTOMATIC or AUTOMATIC.
+CREATE TABLE IF NOT EXISTS segments (
+    segmentation_id INTEGER NOT NULL REFERENCES segmentations (id) ON DELETE CASCADE,
+    label           INTEGER NOT NULL CHECK (label BETWEEN 1 AND 255),
+    name            TEXT    NOT NULL,
+    color           TEXT    NOT NULL,
+    algorithm_type  TEXT    NOT NULL DEFAULT 'MANUAL',
+    PRIMARY KEY (segmentation_id, label)
+) WITHOUT ROWID;

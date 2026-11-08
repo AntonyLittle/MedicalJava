@@ -17,8 +17,10 @@ public class StoreConfig {
     @Bean
     StorePaths storePaths(@Value("${app.store-dir:store}") String storeDir) throws IOException {
         var root = Path.of(storeDir).toAbsolutePath().normalize();
-        var paths = new StorePaths(root, root.resolve("store.db"), root.resolve("volumes"), root.resolve("tmp"));
+        var paths = new StorePaths(root, root.resolve("store.db"), root.resolve("volumes"),
+                root.resolve("segmentations"), root.resolve("tmp"));
         Files.createDirectories(paths.volumes());
+        Files.createDirectories(paths.segmentations());
         Files.createDirectories(paths.tmp());
         return paths;
     }

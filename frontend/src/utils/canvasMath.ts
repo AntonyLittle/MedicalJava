@@ -162,6 +162,23 @@ export function sourceToCanvas(
   };
 }
 
+// Inverse of sourceToCanvas: the (fractional) source pixel at a canvas position; integers are pixel centres.
+export function canvasToSource(
+  canvasX: number,
+  canvasY: number,
+  sourceWidth: number,
+  sourceHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  viewTransform: ViewTransform,
+  spacing: PixelSpacing = SQUARE_PIXELS
+): { x: number; y: number } {
+  const scale = fitImageScale(sourceWidth, sourceHeight, canvasWidth, canvasHeight, spacing);
+  const unzoomedX = (canvasX - canvasWidth / 2 - viewTransform.panX) / viewTransform.zoom + canvasWidth / 2;
+  const unzoomedY = (canvasY - canvasHeight / 2 - viewTransform.panY) / viewTransform.zoom + canvasHeight / 2;
+  return { x: unzoomedX / scale.x - 0.5, y: unzoomedY / scale.y - 0.5 };
+}
+
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }

@@ -27,6 +27,8 @@ import { ThickMprVolumeViewer } from './components/ThickMprVolumeViewer';
 import { ThickMprControls } from './components/ThickMprControls';
 import { MprOverviewViewer } from './components/MprOverviewViewer';
 import { VolumeRenderViewer } from './components/VolumeRenderViewer';
+import { SegmentationPanel } from './components/SegmentationPanel';
+import { useSegmentation } from './hooks/segmentationContext';
 
 // Used until a volume is loaded; each volume then starts with its own default window.
 const DEFAULT_WINDOW_LEVEL = 40;
@@ -79,11 +81,34 @@ function App() {
 
   const { status: importStatus, refresh: refreshImportStatus } = useImportStatus(reloadLists);
 
-  const selectPatient = useCallback((patientId: number | null) => {
-    setSelectedPatientId(patientId);
-    setSelectedVolumeId(null);
-    setVolumes([]);
-  }, []);
+  // The open segmentation belongs to the loaded volume; switching away asks before discarding unsaved changes.
+  const segmentation = useSegmentation();
+  const confirmDiscard = segmentation?.confirmDiscard;
+  const setSegmentationSession = segmentation?.setSession;
+  const leaveVolume = useCallback(
+    (ask: boolean): boolean => {
+      if (ask && confirmDiscard && !confirmDiscard()) return false;
+      setSegmentationSession?.(null);
+      return true;
+    },
+    [confirmDiscard, setSegmentationSession]
+  );
+
+  const selectPatient = useCallback(
+    (patientId: number | null, ask = true) => {
+      if (!leaveVolume(ask)) return;
+      setSelectedPatientId(patientId);
+      setSelectedVolumeId(null);
+      setVolumes([]);
+    },
+    [leaveVolume]
+  );
+  const selectVolume = useCallback(
+    (volumeId: number | null) => {
+      if (leaveVolume(true)) setSelectedVolumeId(volumeId);
+    },
+    [leaveVolume]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -181,24 +206,28 @@ function App() {
     (uploaded: Volume[]) => {
       reloadLists();
       const [first] = uploaded;
-      if (first) {
-        if (first.patientId !== selectedPatientId) selectPatient(first.patientId);
+      if (first && leaveVolume(true)) {
+        if (first.patientId !== selectedPatientId) selectPatient(first.patientId, false);
         setSelectedVolumeId(first.volumeId);
       }
       setNotice(`Uploaded ${plural(uploaded.length, 'volume')}`);
     },
-    [reloadLists, selectPatient, selectedPatientId]
+    [reloadLists, selectPatient, selectedPatientId, leaveVolume]
   );
 
-  const handleVolumeDeleted = useCallback((deleted: Volume) => {
-    setSelectedVolumeId((current) => (current === deleted.volumeId ? null : current));
-    setVolumesVersion((v) => v + 1);
-    setNotice(`Deleted volume ${deleted.name}`);
-  }, []);
+  const handleVolumeDeleted = useCallback(
+    (deleted: Volume) => {
+      if (deleted.volumeId === selectedVolumeId) leaveVolume(false);
+      setSelectedVolumeId((current) => (current === deleted.volumeId ? null : current));
+      setVolumesVersion((v) => v + 1);
+      setNotice(`Deleted volume ${deleted.name}`);
+    },
+    [selectedVolumeId, leaveVolume]
+  );
 
   const handlePatientDeleted = useCallback(
     (deleted: Patient) => {
-      if (deleted.patientId === selectedPatientId) selectPatient(null);
+      if (deleted.patientId === selectedPatientId) selectPatient(null, false);
       setPatientsVersion((v) => v + 1);
       setNotice(`Deleted patient ${deleted.name}`);
     },
@@ -232,7 +261,7 @@ function App() {
         onPatientChange={selectPatient}
         volumes={volumes}
         selectedVolumeId={selectedVolumeId}
-        onVolumeChange={setSelectedVolumeId}
+        onVolumeChange={selectVolume}
       />
 
       <DataManagementToolbar
@@ -269,6 +298,7 @@ function App() {
                 stack of raw values. Rescan the data folder (or upload it again) to update it.
               </Alert>
             )}
+            <SegmentationPanel volume={volume} />
             <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2, mb: 2 }}>
               <CineVolumeViewer
                 volume={volume}
