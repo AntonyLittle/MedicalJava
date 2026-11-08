@@ -4,8 +4,9 @@ import { clippedBox, type ClipBox, type CutPlane } from './clipping';
 import { createProgram, uniformLocator } from './gl';
 import { affineToMat4 } from './affine';
 import { LUT_SIZE, lutRangeVisible, type RgbColor, type TransferLut } from './transferFunctions';
+import type { SharedGpu } from './sharedGpu';
 import { BRICK_SIZE } from './volumeGrid';
-import { uploadVolume, type GpuVolume } from './volumeTexture';
+import type { GpuVolume } from './volumeTexture';
 import vertexSource from './shaders/raycast.vert?raw';
 import fragmentSource from './shaders/raycast.frag?raw';
 
@@ -90,8 +91,9 @@ function sameOccupancyInputs(a: OccupancyInputs | null, b: OccupancyInputs): boo
   }
 }
 
-// Owns the GL resources for ray casting one volume into the context's default framebuffer.
+// Owns the GL resources for ray casting the shared context's volume into its drawing buffer.
 export class VolumeRenderer {
+  private readonly gpu: SharedGpu;
   private readonly gl: WebGL2RenderingContext;
   private readonly program: WebGLProgram;
   private readonly uniform: (name: string) => WebGLUniformLocation | null;
@@ -99,12 +101,12 @@ export class VolumeRenderer {
   private readonly lutTexture: WebGLTexture;
   private readonly occupancyTexture: WebGLTexture;
   private volume: GpuVolume | null = null;
-  private source: Volume | null = null;
-  private uploadError: Error | null = null;
   private uploadedLut: TransferLut | null = null;
   private occupancyInputs: OccupancyInputs | null = null;
 
-  constructor(gl: WebGL2RenderingContext) {
+  constructor(gpu: SharedGpu) {
+    const gl = gpu.gl;
+    this.gpu = gpu;
     this.gl = gl;
     this.program = createProgram(gl, vertexSource, fragmentSource);
     this.uniform = uniformLocator(gl, this.program);
@@ -129,27 +131,15 @@ export class VolumeRenderer {
     return this.volume?.grid ?? null;
   }
 
-  // Uploads the volume unless it is the one already on the GPU. A failed upload is remembered and rethrown rather than
-  // retried on every frame.
+  // The shared context uploads the volume (once, for every view) and rethrows a failed upload.
   setVolume(volume: Volume | null): void {
-    if (volume === this.source) {
-      if (this.uploadError) throw this.uploadError;
-      return;
-    }
-    if (this.volume) this.gl.deleteTexture(this.volume.texture);
-    this.volume = null;
-    this.source = volume;
-    this.uploadError = null;
+    const uploaded = volume ? this.gpu.volume(volume) : null;
+    if (uploaded === this.volume) return;
+    this.volume = uploaded;
     this.occupancyInputs = null;
-    if (!volume) return;
+    if (!uploaded) return;
 
-    try {
-      this.volume = uploadVolume(this.gl, volume);
-    } catch (e) {
-      this.uploadError = e instanceof Error ? e : new Error(String(e));
-      throw this.uploadError;
-    }
-    const [bx, by, bz] = this.volume.bricks.dims;
+    const [bx, by, bz] = uploaded.bricks.dims;
     this.gl.bindTexture(this.gl.TEXTURE_3D, this.occupancyTexture);
     this.gl.texImage3D(this.gl.TEXTURE_3D, 0, this.gl.R8UI, bx, by, bz, 0, this.gl.RED_INTEGER, this.gl.UNSIGNED_BYTE, null);
   }
@@ -173,10 +163,11 @@ export class VolumeRenderer {
     this.occupancyInputs = inputs;
   }
 
-  render(params: RenderParams): void {
+  // Draws a width × height image into the top-left corner of the drawing buffer; copy it out with gpu.copyTo().
+  render(params: RenderParams, width: number, height: number): void {
     const gl = this.gl;
     const u = this.uniform;
-    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    this.gpu.begin(width, height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
     const volume = this.volume;
@@ -256,11 +247,10 @@ export class VolumeRenderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  // The volume texture belongs to the shared context and outlives the renderer.
   dispose(): void {
     const gl = this.gl;
-    if (this.volume) gl.deleteTexture(this.volume.texture);
     this.volume = null;
-    this.source = null;
     gl.deleteTexture(this.lutTexture);
     gl.deleteTexture(this.occupancyTexture);
     gl.deleteVertexArray(this.vertexArray);

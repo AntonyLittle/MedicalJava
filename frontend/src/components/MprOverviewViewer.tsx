@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { Volume } from '../api/types';
 import { useCameraDrag } from '../hooks/useCameraDrag';
-import { useFullVolumeRadioDensities } from '../hooks/useFullVolumeRadioDensities';
+import { MAX_OUTPUT_PIXELS, useFullVolumeRadioDensities } from '../hooks/useFullVolumeRadioDensities';
+import { useGpuMprImage } from '../hooks/useGpuMprImage';
 import { useViewerInteractions } from '../hooks/useViewerInteractions';
 import {
   buildMprPlanes,
@@ -13,7 +14,14 @@ import {
 } from '../utils/canvasMath';
 import { MPR_COLOR_BY_ORIENTATION } from '../utils/mprColors';
 import { planeIntersectionInVolume, planeOutlineInVolume, projectToImage } from '../utils/planeOverlay';
-import { volumeCentre, type PlaneOrientation, type ProjectionMode } from '../utils/mprSampler';
+import {
+  fitSpacingScale,
+  fullVolumeThicknessMm,
+  PREVIEW_SPACING_SCALE,
+  volumeCentre,
+  type PlaneOrientation,
+  type ProjectionMode,
+} from '../utils/mprSampler';
 import { CanvasRenderer, type OverlayDrawer } from './CanvasRenderer';
 
 const ORIENTATIONS: PlaneOrientation[] = ['axial', 'coronal', 'sagittal'];
@@ -56,7 +64,15 @@ export function MprOverviewViewer({
   const [cameraRotation, setCameraRotation] = useState<Quaternion>(DEFAULT_CAMERA_ROTATION);
   const centre = useMemo(() => volumeCentre(volume), [volume]);
   const camera = useMemo(() => buildMprPlanes(centre, cameraRotation).axial, [centre, cameraRotation]);
-  const radioDensities = useFullVolumeRadioDensities(volume, camera, projectionMode);
+  const spacingScale = useMemo(() => fitSpacingScale(volume, camera, MAX_OUTPUT_PIXELS), [volume, camera]);
+  const thicknessMm = useMemo(() => fullVolumeThicknessMm(volume, camera.normalXyz), [volume, camera]);
+  const gpu = useGpuMprImage(volume, camera, windowLevel, windowWidth, {
+    slab: { thicknessMm, mode: projectionMode },
+    spacingScale,
+    previewSpacingScale: PREVIEW_SPACING_SCALE,
+  });
+  const radioDensities = useFullVolumeRadioDensities(volume, camera, projectionMode, !gpu.active);
+  const geometry = (gpu.image ?? radioDensities)?.geometry;
 
   const startRotate = useCameraDrag(camera, cameraRotation, setCameraRotation);
   const { viewTransform, handlePointerEvent } = useViewerInteractions({
@@ -69,7 +85,6 @@ export function MprOverviewViewer({
 
   const drawOverlay = useCallback<OverlayDrawer>(
     (context, project) => {
-      const geometry = radioDensities?.geometry;
       if (!geometry) return;
 
       for (const orientation of ORIENTATIONS) {
@@ -112,7 +127,7 @@ export function MprOverviewViewer({
       }
       context.setLineDash([]);
     },
-    [radioDensities, volume, planes, camera]
+    [geometry, volume, planes, camera]
   );
 
   return (
@@ -120,6 +135,7 @@ export function MprOverviewViewer({
       width={400}
       height={400}
       radioDensities={radioDensities}
+      image={gpu.image}
       windowLevel={windowLevel}
       windowWidth={windowWidth}
       viewTransform={viewTransform}

@@ -3,6 +3,7 @@ import type { PointerEvent } from 'react';
 import { Alert, Box } from '@mui/material';
 import type { Volume } from '../api/types';
 import { useOrbitCamera } from '../hooks/useOrbitCamera';
+import { useSharedGpu } from '../hooks/useSharedGpu';
 import { usePointerDragMode, type DragStarter } from '../hooks/usePointerDragMode';
 import { useWlwwDrag } from '../hooks/useWlwwDrag';
 import { projectToCanvas, rayForPixel, type CameraFrame } from '../render3d/camera';
@@ -39,12 +40,6 @@ import {
 } from './VolumeRenderControls';
 
 const WIDTH = 512;
-const CONTEXT_ATTRIBUTES: WebGLContextAttributes = {
-  alpha: false,
-  antialias: false,
-  depth: false,
-  powerPreference: 'high-performance',
-};
 const HEIGHT = 512;
 
 // While the view is changing it is drawn at reduced resolution with longer steps, then refined once input pauses.
@@ -155,8 +150,8 @@ export function VolumeRenderViewer({
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<VolumeRenderer | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Bumped when a lost WebGL context is restored, to rebuild every GPU resource.
-  const [contextVersion, setContextVersion] = useState(0);
+  // The version changes when a lost context is restored, to rebuild every GPU resource.
+  const { gpu, version: contextVersion } = useSharedGpu();
 
   const centre = useMemo(() => volumeCentre(volume), [volume]);
   const fitRadiusMm = useMemo(() => {
@@ -212,37 +207,27 @@ export function VolumeRenderViewer({
     [settings, frame, lut, renderWindowLevel, renderWindowWidth, cutPlane, volume, isoValue]
   );
 
-  // The renderer is created lazily in draw(); losing the context invalidates it, and a restore triggers a redraw.
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const handleLost = (e: Event) => {
-      e.preventDefault();
-      rendererRef.current = null;
-    };
-    const handleRestored = () => setContextVersion((v) => v + 1);
-    canvas.addEventListener('webglcontextlost', handleLost);
-    canvas.addEventListener('webglcontextrestored', handleRestored);
-    return () => {
-      canvas.removeEventListener('webglcontextlost', handleLost);
-      canvas.removeEventListener('webglcontextrestored', handleRestored);
+  // The renderer is created lazily in draw(); a restored context needs a new one.
+  useEffect(
+    () => () => {
       rendererRef.current?.dispose();
       rendererRef.current = null;
-    };
-  }, []);
+    },
+    [gpu, contextVersion]
+  );
 
-  // Preview immediately, refine once the parameters have been stable for a moment.
+  // Preview immediately, refine once the parameters have been stable for a moment. The image is rendered in the
+  // context shared with the MPR views (so the volume is on the GPU once) and copied into this canvas.
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    const context = canvasRef.current?.getContext('2d');
+    if (!context) return;
     const draw = (preview: boolean) => {
       try {
+        if (!gpu) throw new Error('3D rendering needs WebGL2, which this browser does not provide.');
+        if (gpu.isLost()) return;
         let renderer = rendererRef.current;
         if (!renderer) {
-          const gl = canvas.getContext('webgl2', CONTEXT_ATTRIBUTES);
-          if (!gl) throw new Error('3D rendering needs WebGL2, which this browser does not provide.');
-          if (gl.isContextLost()) return;
-          renderer = new VolumeRenderer(gl);
+          renderer = new VolumeRenderer(gpu);
           rendererRef.current = renderer;
         }
         renderer.setVolume(volume);
@@ -250,13 +235,12 @@ export function VolumeRenderViewer({
         const scale = preview ? PREVIEW_RESOLUTION_SCALE : 1;
         const width = Math.round(WIDTH * scale);
         const height = Math.round(HEIGHT * scale);
-        // Assigning the size reallocates the drawing buffer, so only do it when it changes.
-        if (canvas.width !== width) canvas.width = width;
-        if (canvas.height !== height) canvas.height = height;
-        renderer.render({
-          ...renderParams,
-          stepFactor: renderParams.stepFactor * (preview ? PREVIEW_STEP_MULTIPLIER : 1),
-        });
+        renderer.render(
+          { ...renderParams, stepFactor: renderParams.stepFactor * (preview ? PREVIEW_STEP_MULTIPLIER : 1) },
+          width,
+          height
+        );
+        gpu.copyTo(context, width, height, 0, 0, WIDTH, HEIGHT);
         setError(null);
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -271,7 +255,7 @@ export function VolumeRenderViewer({
       cancelAnimationFrame(frameId);
       clearTimeout(timer);
     };
-  }, [volume, renderParams, contextVersion]);
+  }, [gpu, volume, renderParams, contextVersion]);
 
   useEffect(() => {
     const overlay = overlayRef.current;

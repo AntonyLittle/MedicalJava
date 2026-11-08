@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { PointerEvent } from 'react';
-import type { RadioDensities } from '../api/types';
+import type { ImageGeometry, RadioDensities } from '../api/types';
 import { fitImageScale, IDENTITY_VIEW_TRANSFORM, sourceToCanvas, type ViewTransform } from '../utils/canvasMath';
 import { mergeRefs } from '../utils/mergeRefs';
 
@@ -13,10 +13,21 @@ export type OverlayDrawer = (
   project: (imageX: number, imageY: number) => { x: number; y: number }
 ) => void;
 
+// An image whose source-resolution pixels, already windowed, are painted by its producer (e.g. on the GPU) into a
+// context of widthPixels × heightPixels. A new object means new pixels.
+export interface PaintedImage {
+  widthPixels: number;
+  heightPixels: number;
+  geometry?: ImageGeometry;
+  paint: (context: CanvasRenderingContext2D) => void;
+}
+
 interface CanvasRendererProps {
   width: number;
   height: number;
   radioDensities?: RadioDensities;
+  // Shown instead of radioDensities when given; the window props don't apply to it.
+  image?: PaintedImage;
   windowLevel: number;
   windowWidth: number;
   viewTransform?: ViewTransform;
@@ -54,25 +65,40 @@ function buildGrayLut(windowLevel: number, windowWidth: number): Uint8ClampedArr
 interface SourceImage {
   canvas: HTMLCanvasElement;
   context: CanvasRenderingContext2D;
-  imageData: ImageData;
-  densities: RadioDensities;
-  lut: Uint8ClampedArray;
+  imageData?: ImageData;
+  densities?: RadioDensities;
+  lut?: Uint8ClampedArray;
+  painted?: PaintedImage;
+}
+
+// The previous source canvas when it already has the size, otherwise a new one.
+function sourceCanvas(
+  previous: SourceImage | null,
+  widthPixels: number,
+  heightPixels: number
+): Pick<SourceImage, 'canvas' | 'context' | 'imageData'> | null {
+  if (previous && previous.canvas.width === widthPixels && previous.canvas.height === heightPixels) return previous;
+  const canvas = document.createElement('canvas');
+  canvas.width = widthPixels;
+  canvas.height = heightPixels;
+  const context = canvas.getContext('2d');
+  return context && { canvas, context };
+}
+
+function paintPaintedImage(previous: SourceImage | null, painted: PaintedImage): SourceImage | null {
+  const target = sourceCanvas(previous, painted.widthPixels, painted.heightPixels);
+  if (!target) return null;
+  painted.paint(target.context);
+  return { ...target, painted };
 }
 
 function paintSourceImage(previous: SourceImage | null, densities: RadioDensities, lut: Uint8ClampedArray): SourceImage | null {
   const { widthPixels, heightPixels, radiodensities } = densities;
 
-  let canvas = previous?.canvas;
-  let context = previous?.context;
-  let imageData = previous?.imageData;
-  if (!canvas || !context || !imageData || canvas.width !== widthPixels || canvas.height !== heightPixels) {
-    canvas = document.createElement('canvas');
-    canvas.width = widthPixels;
-    canvas.height = heightPixels;
-    context = canvas.getContext('2d') ?? undefined;
-    if (!context) return null;
-    imageData = context.createImageData(widthPixels, heightPixels);
-  }
+  const target = sourceCanvas(previous, widthPixels, heightPixels);
+  if (!target) return null;
+  const { canvas, context } = target;
+  const imageData = target.imageData ?? context.createImageData(widthPixels, heightPixels);
 
   const data = imageData.data;
   const pixelCount = widthPixels * heightPixels;
@@ -90,7 +116,7 @@ function paintSourceImage(previous: SourceImage | null, densities: RadioDensitie
 }
 
 export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>(function CanvasRenderer(
-  { width, height, radioDensities, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onDoubleClick, borderColor, drawOverlay },
+  { width, height, radioDensities, image, windowLevel, windowWidth, viewTransform = IDENTITY_VIEW_TRANSFORM, onPointerDown, onPointerMove, onPointerUp, onDoubleClick, borderColor, drawOverlay },
   forwardedRef
 ) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -104,7 +130,8 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!radioDensities || !canvas) return;
+    const shown = image ?? radioDensities;
+    if (!shown || !canvas) return;
 
     // Assigning width/height clears and reallocates the canvas, so only do it when the size changed.
     if (canvas.width !== width) canvas.width = width;
@@ -114,13 +141,18 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
     if (!context) return;
 
     let source = sourceImageRef.current;
-    if (!source || source.densities !== radioDensities || source.lut !== lut) {
+    if (image) {
+      if (!source || source.painted !== image) {
+        source = paintPaintedImage(source, image);
+        sourceImageRef.current = source;
+      }
+    } else if (radioDensities && (!source || source.densities !== radioDensities || source.lut !== lut)) {
       source = paintSourceImage(source, radioDensities, lut);
       sourceImageRef.current = source;
     }
     if (!source) return;
 
-    const { widthPixels, heightPixels, geometry } = radioDensities;
+    const { widthPixels, heightPixels, geometry } = shown;
     const spacing = geometry && { u: geometry.spacingUMm, v: geometry.spacingVMm };
     const imageScale = fitImageScale(widthPixels, heightPixels, width, height, spacing);
 
@@ -146,7 +178,7 @@ export const CanvasRenderer = forwardRef<HTMLCanvasElement, CanvasRendererProps>
     drawOverlay?.(context, (imageX, imageY) =>
       sourceToCanvas(imageX, imageY, widthPixels, heightPixels, width, height, viewTransform, spacing)
     );
-  }, [radioDensities, lut, viewTransform, drawOverlay, width, height]);
+  }, [image, radioDensities, lut, viewTransform, drawOverlay, width, height]);
 
   return (
     <canvas

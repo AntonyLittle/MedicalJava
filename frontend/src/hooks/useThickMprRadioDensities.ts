@@ -13,30 +13,34 @@ import { usePlaneParams } from './usePlaneParams';
 import { useProgressiveValue } from './useProgressiveValue';
 import { useScrollDeferredParams } from './useScrollDeferredParams';
 
-// Returns a half-resolution result immediately, then the full-quality one once the inputs stop changing.
+// Returns a half-resolution result immediately, then the full-quality one once the inputs stop changing. CPU sampling,
+// used when the GPU can't render the slab; nothing is computed while active is false.
 export function useThickMprRadioDensities(
   volume: Volume,
   viewablePlane: ViewablePlane,
   thicknessMm: number,
-  mode: ProjectionMode
+  mode: ProjectionMode,
+  active = true
 ): RadioDensities | undefined {
   const params = useScrollDeferredParams(usePlaneParams(volume, viewablePlane));
-  const hasSlices = volume.slices.length > 0;
+  const enabled = active && volume.slices.length > 0;
 
   const computePreview = useCallback(
     () =>
-      sampleSlab(volume, planeFromParams(volume, params), {
-        thicknessMm,
-        mode,
-        maxSamples: PREVIEW_SLAB_SAMPLES,
-        spacingScale: PREVIEW_SPACING_SCALE,
-      }),
-    [volume, params, thicknessMm, mode]
+      active
+        ? sampleSlab(volume, planeFromParams(volume, params), {
+            thicknessMm,
+            mode,
+            maxSamples: PREVIEW_SLAB_SAMPLES,
+            spacingScale: PREVIEW_SPACING_SCALE,
+          })
+        : undefined,
+    [active, volume, params, thicknessMm, mode]
   );
   const startFull = useCallback(
     () => sampleSlabJob(volume, planeFromParams(volume, params), { thicknessMm, mode }),
     [volume, params, thicknessMm, mode]
   );
 
-  return useProgressiveValue(computePreview, startFull, hasSlices);
+  return useProgressiveValue(computePreview, startFull, enabled);
 }

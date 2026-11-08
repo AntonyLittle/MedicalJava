@@ -1,8 +1,10 @@
+import { useGpuMprImage } from '../hooks/useGpuMprImage';
 import { useThinMprRadioDensities } from '../hooks/useThinMprRadioDensities';
 import { MprViewerCanvas, type MprViewerCanvasProps } from './MprViewerCanvas';
 
 export function ThinMprVolumeViewer(props: MprViewerCanvasProps) {
-  const radioDensities = useThinMprRadioDensities(props.volume, props.viewablePlane);
+  const gpu = useGpuMprImage(props.volume, props.viewablePlane, props.windowLevel, props.windowWidth);
+  const radioDensities = useThinMprRadioDensities(props.volume, props.viewablePlane, !gpu.active);
 
-  return <MprViewerCanvas radioDensities={radioDensities} {...props} />;
+  return <MprViewerCanvas image={gpu.image} radioDensities={radioDensities} {...props} />;
 }

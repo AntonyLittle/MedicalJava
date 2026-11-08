@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import type { RadioDensities, Volume } from '../api/types';
-import { CanvasRenderer } from './CanvasRenderer';
+import { CanvasRenderer, type PaintedImage } from './CanvasRenderer';
 import { useWheelDistanceScroll } from '../hooks/useWheelDistanceScroll';
 import { useViewerInteractions } from '../hooks/useViewerInteractions';
 import { useRotateDrag } from '../hooks/useRotateDrag';
@@ -23,6 +23,7 @@ export interface MprViewerCanvasProps {
 
 export function MprViewerCanvas({
   radioDensities,
+  image,
   volume,
   orientation,
   viewablePlane,
@@ -33,7 +34,7 @@ export function MprViewerCanvas({
   windowWidth,
   onWindowLevelChange,
   onWindowWidthChange,
-}: MprViewerCanvasProps & { radioDensities: RadioDensities | undefined }) {
+}: MprViewerCanvasProps & { radioDensities: RadioDensities | undefined; image?: PaintedImage }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const startRotate = useRotateDrag(viewablePlane, mprRotation, onMprRotationChange);
@@ -52,6 +53,7 @@ export function MprViewerCanvas({
       width={400}
       height={400}
       radioDensities={radioDensities}
+      image={image}
       windowLevel={windowLevel}
       windowWidth={windowWidth}
       viewTransform={viewTransform}

@@ -64,6 +64,11 @@ even grid, and axes larger than the GPU's 3D texture limit are decimated. No ser
   level/width). Double-click resets the view. The view is drawn at half resolution while it changes and refined
   once input pauses. Empty bricks of 8³ voxels are skipped.
 
+The MPR views (thin, thick slab and the overview projection) are rendered on the GPU too, from the same texture: one
+shared off-screen WebGL2 context renders every view and copies the result into its canvas, so the volume is on the GPU
+only once. Slabs are sampled more coarsely while they move and refined once input pauses. Without WebGL2, or if the
+volume doesn't fit on the GPU, the MPR views fall back to sampling on the CPU (`frontend/src/utils/mprSampler.ts`).
+
 Presets and their *Shift* are in HU, so they apply to CT volumes. For other data (e.g. MR), *VR* ramps opacity across
 the shared window level/width instead, and the surface threshold is in the volume's own units. The 3D view, the MPR
 views and picking all use the volume's acquired orientation, so oblique and tilted stacks line up with the 2D views.

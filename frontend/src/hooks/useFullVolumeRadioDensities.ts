@@ -16,7 +16,7 @@ import { usePlaneParams } from './usePlaneParams';
 import { useProgressiveValue } from './useProgressiveValue';
 
 // The canvas is 400 px, so a finer image only costs sampling time.
-const MAX_OUTPUT_PIXELS = 512;
+export const MAX_OUTPUT_PIXELS = 512;
 
 function projectionSettings(volume: Volume, params: PlaneParams, mode: ProjectionMode, preview: boolean) {
   const plane = planeFromParams(volume, params);
@@ -31,23 +31,25 @@ function projectionSettings(volume: Volume, params: PlaneParams, mode: Projectio
 }
 
 // Projects the whole volume along the camera plane's normal: coarse while the camera moves, full quality after.
+// CPU sampling, used when the GPU can't render the projection; nothing is computed while active is false.
 export function useFullVolumeRadioDensities(
   volume: Volume,
   camera: ViewablePlane,
-  mode: ProjectionMode
+  mode: ProjectionMode,
+  active = true
 ): RadioDensities | undefined {
   const params = usePlaneParams(volume, camera);
-  const hasSlices = volume.slices.length > 0;
+  const enabled = active && volume.slices.length > 0;
 
   const computePreview = useCallback(() => {
-    if (!hasSlices) return undefined;
+    if (!enabled) return undefined;
     const { plane, slab } = projectionSettings(volume, params, mode, true);
     return sampleSlab(volume, plane, slab);
-  }, [volume, params, mode, hasSlices]);
+  }, [volume, params, mode, enabled]);
   const startFull = useCallback(() => {
     const { plane, slab } = projectionSettings(volume, params, mode, false);
     return sampleSlabJob(volume, plane, slab);
   }, [volume, params, mode]);
 
-  return useProgressiveValue(computePreview, startFull, hasSlices);
+  return useProgressiveValue(computePreview, startFull, enabled);
 }

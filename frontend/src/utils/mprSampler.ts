@@ -618,6 +618,24 @@ function createPlaneSampling(volume: Volume, plane: ViewablePlane, spacingScale:
   };
 }
 
+export interface ImageLayout {
+  widthPixels: number;
+  heightPixels: number;
+  geometry: ImageGeometry;
+}
+
+// The pixel grid sampleCrossSection and sampleSlabJob use for the plane, for renderers that sample it themselves.
+export function imageLayout(volume: Volume, patientPlane: ViewablePlane, spacingScale = 1): ImageLayout {
+  const plane = toLocalPlane(volume, patientPlane);
+  if (isLocalAxisAligned(volume, plane)) {
+    const { grid, colSpacing, rowSpacing } = planeLayout(volume, orientationFromNormal(plane.normalXyz), spacingScale);
+    return { ...grid, geometry: planeImageGeometry(volume, plane, colSpacing, rowSpacing) };
+  }
+  const spacing = outputSpacing(volume) * spacingScale;
+  const { widthPixels, heightPixels } = obliqueGrid(volume, plane, spacing);
+  return { widthPixels, heightPixels, geometry: planeImageGeometry(volume, plane, spacing) };
+}
+
 export function sampleCrossSection(volume: Volume, patientPlane: ViewablePlane, spacingScale = 1): RadioDensities | undefined {
   const slices = volume.slices;
   if (slices.length === 0) return undefined;
