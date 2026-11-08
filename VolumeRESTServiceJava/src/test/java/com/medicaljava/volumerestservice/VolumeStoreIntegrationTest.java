@@ -27,6 +27,7 @@ import java.nio.ByteOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HexFormat;
 import java.util.List;
@@ -34,16 +35,19 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.within;
 
 /**
  * End-to-end tests of the volume store against real DICOM series from the repository's Data directory. Expected
- * pixel hashes were captured from the original directory-backed implementation.
+ * pixel hashes come from the original directory-backed implementation's pixels, reordered along each stack's
+ * normal and with the MR padding value (0) replaced by the lowest real value (1).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class VolumeStoreIntegrationTest {
 
     private static final Path SAMPLES = Path.of("..", "Data", "Anonymized_20261014");
+    private static final Path CT_SAMPLE = Path.of("..", "Data", "John Doe", "Series Repeat 3");
     private static final Path WORK;
     private static final Path DATA_DIR;
     private static final Path STORE_DIR;
@@ -99,14 +103,30 @@ class VolumeStoreIntegrationTest {
         assertThat(volumes.size()).isEqualTo(2);
 
         var a = volumeId(patientId, "A");
-        assertThat(pixelHash(patientId, a)).isEqualTo("49812c806b1e45b8");
-        assertThat(pixelHash(patientId, volumeId(patientId, "B"))).isEqualTo("9d1604e9bddcf713");
+        assertThat(pixelHash(patientId, a)).isEqualTo("29e4f383059b0ee2");
+        assertThat(pixelHash(patientId, volumeId(patientId, "B"))).isEqualTo("f8619c3cfca60076");
 
         var full = json(get("/api/Patients/" + patientId + "/Volumes/" + a));
-        var slice = full.get("slices").get(0);
-        assertThat(full.get("slices").size()).isEqualTo(20);
+        var slices = full.get("slices");
+        var slice = slices.get(0);
+        assertThat(slices.size()).isEqualTo(20);
         assertThat(slice.get("radiodensities").size())
                 .isEqualTo(slice.get("widthPixels").asInt() * slice.get("heightPixels").asInt());
+
+        // Coronal: ordered anterior to posterior along the normal, not by z (which is the same for every slice).
+        assertThat(vector(full.get("rowDirection"))).containsExactly(new double[] {0.999993, -0.0036927, 0},
+                within(1e-5));
+        assertThat(vector(full.get("columnDirection"))).containsExactly(new double[] {0, 0, -1}, within(1e-9));
+        assertThat(slice.get("positionYMm").asDouble()).isCloseTo(-81.1051, within(1e-3));
+        assertThat(slices.get(19).get("positionYMm").asDouble()).isCloseTo(4.39434, within(1e-3));
+        for (int i = 1; i < slices.size(); i++) {
+            assertThat(slices.get(i).get("depthPositionMm").asDouble())
+                    .isGreaterThan(slices.get(i - 1).get("depthPositionMm").asDouble());
+        }
+        assertThat(full.get("valueUnits").asString()).isEmpty();
+        assertThat(full.get("valueSlope").asDouble()).isEqualTo(1);
+        assertThat(full.get("minValue").asDouble()).isEqualTo(1);
+        assertThat(full.get("formatVersion").asInt()).isEqualTo(1);
     }
 
     @Test
@@ -150,7 +170,7 @@ class VolumeStoreIntegrationTest {
         int volumeId = created.get(0).get("volumeId").asInt();
         assertThat(response.getHeaders().getLocation()).hasToString(
                 "http://localhost:" + environment.getProperty("local.server.port") + path + "/" + volumeId);
-        assertThat(pixelHash(patientId, volumeId)).isEqualTo("238414ffb566430d");
+        assertThat(pixelHash(patientId, volumeId)).isEqualTo("2f920b558e0568a6");
 
         assertThat(upload(path, dicomFiles("series-00004")).getStatusCode().value()).isEqualTo(409);
     }
@@ -172,7 +192,7 @@ class VolumeStoreIntegrationTest {
         var created = json(response).get(0);
         int patientId = created.get("patientId").asInt();
         assertThat(patientId).isNotEqualTo(patientId("Test Patient"));
-        assertThat(pixelHash(patientId, created.get("volumeId").asInt())).isEqualTo("74e0b831d0f52919");
+        assertThat(pixelHash(patientId, created.get("volumeId").asInt())).isEqualTo("8b5702f3be31959f");
     }
 
     @Test
@@ -232,7 +252,79 @@ class VolumeStoreIntegrationTest {
         assertThat(json(get("/api/import/status")).get("failures").size()).isZero();
     }
 
+    @Test
+    @Order(10)
+    void mixedOrientationSeriesIsSplitAndPartsAreDeletedIndividually() throws IOException {
+        copyDir(SAMPLES.resolve("series-00000"), DATA_DIR.resolve("Localizer").resolve("L"));
+        assertThat(json(post("/api/import")).get("imported").asInt()).isEqualTo(1);
+
+        int patientId = patientId("Localizer");
+        var names = new ArrayList<String>();
+        json(get("/api/Patients/" + patientId + "/Volumes")).forEach(v -> names.add(v.get("name").asString()));
+        assertThat(names).containsExactly("L (axial)", "L (coronal)", "L (sagittal)");
+
+        int sagittal = volumeId(patientId, "L (sagittal)");
+        var volume = json(get("/api/Patients/" + patientId + "/Volumes/" + sagittal));
+        assertThat(volume.get("slices").size()).isEqualTo(9);
+        assertThat(vector(volume.get("rowDirection"))).containsExactly(new double[] {0, 1, 0}, within(1e-9));
+
+        int excludedBefore = json(post("/api/import")).get("excluded").asInt();
+        assertThat(delete("/api/Patients/" + patientId + "/Volumes/" + sagittal).getStatusCode().value())
+                .isEqualTo(204);
+        // The directory still has volumes, so it is scanned as usual rather than excluded.
+        var scan = json(post("/api/import"));
+        assertThat(scan.get("excluded").asInt()).isEqualTo(excludedBefore);
+        assertThat(scan.get("updated").asInt()).isZero();
+        assertThat(scan.get("imported").asInt()).isZero();
+
+        // A changed directory is re-imported, but the deleted part stays deleted.
+        Files.delete(DATA_DIR.resolve("Localizer").resolve("L").resolve("image-00000.dcm"));
+        assertThat(json(post("/api/import")).get("updated").asInt()).isEqualTo(1);
+        assertThat(json(get("/api/Patients/" + patientId + "/Volumes")).size()).isEqualTo(2);
+        assertThat(get("/api/Patients/" + patientId + "/Volumes/" + sagittal).getStatusCode().value())
+                .isEqualTo(404);
+    }
+
+    @Test
+    @Order(11)
+    void ctValuesAreStoredInHounsfieldUnitsWithoutPadding() throws IOException {
+        copyDir(CT_SAMPLE, DATA_DIR.resolve("CT Patient").resolve("Head"));
+        assertThat(json(post("/api/import")).get("imported").asInt()).isEqualTo(1);
+
+        int patientId = patientId("CT Patient");
+        int volumeId = volumeId(patientId, "Head");
+        var summary = json(get("/api/Patients/" + patientId + "/Volumes")).get(0);
+        assertThat(summary.get("valueUnits").asString()).isEqualTo("HU");
+        assertThat(summary.get("valueSlope").asDouble()).isEqualTo(1);
+        assertThat(summary.get("valueIntercept").asDouble()).isEqualTo(0);
+        // Raw pixels are HU + 1024, and the -2000 padding outside the scan circle becomes the lowest value.
+        assertThat(summary.get("minValue").asDouble()).isEqualTo(-1024);
+
+        int[] range = pixelRange(patientId, volumeId);
+        assertThat(range[0]).isEqualTo(-1024);
+        assertThat(range[1]).isEqualTo((int) summary.get("maxValue").asDouble());
+    }
+
     // ---- helpers ----
+
+    private static double[] vector(JsonNode node) {
+        return new double[] {node.get(0).asDouble(), node.get(1).asDouble(), node.get(2).asDouble()};
+    }
+
+    private int[] pixelRange(int patientId, int volumeId) {
+        var body = get("/api/Patients/" + patientId + "/Volumes/" + volumeId + "/binary").getBody();
+        int metadataLength = ByteBuffer.wrap(body, 0, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+        int offset = (4 + metadataLength + 3) & ~3;
+        var pixels = ByteBuffer.wrap(body, offset, body.length - offset).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer();
+        int min = Short.MAX_VALUE;
+        int max = Short.MIN_VALUE;
+        while (pixels.hasRemaining()) {
+            short value = pixels.get();
+            min = Math.min(min, value);
+            max = Math.max(max, value);
+        }
+        return new int[] {min, max};
+    }
 
     private ResponseEntity<byte[]> get(String path) {
         return http.get().uri(path).retrieve().onStatus(s -> true, (req, res) -> {}).toEntity(byte[].class);

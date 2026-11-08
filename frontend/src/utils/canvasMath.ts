@@ -1,7 +1,8 @@
-const MIN_WINDOW_LEVEL = -2000;
-const MAX_WINDOW_LEVEL = 2000;
+// Limits of int16 stored values; the app narrows these to each volume's range.
+const MIN_WINDOW_LEVEL = -32768;
+const MAX_WINDOW_LEVEL = 32767;
 const MIN_WINDOW_WIDTH = 1;
-const MAX_WINDOW_WIDTH = 4000;
+const MAX_WINDOW_WIDTH = 65536;
 
 // Drag sensitivity: pixels of mouse movement per unit of change.
 const WINDOW_LEVEL_PER_PIXEL = 2;
@@ -165,14 +166,6 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-export function clampToBounds(Coordinate: Coordinate, min: Coordinate, max: Coordinate): Coordinate {
-  return {
-    x: clamp(Coordinate.x, min.x, max.x),
-    y: clamp(Coordinate.y, min.y, max.y),
-    z: clamp(Coordinate.z, min.z, max.z)
-  };
-}
-
 export function moveViewablePlaneForward(viewablePlane: ViewablePlane, distanceMm: number): ViewablePlane {
   return {
     positionXyz: {
@@ -186,13 +179,14 @@ export function moveViewablePlaneForward(viewablePlane: ViewablePlane, distanceM
   };
 }
 
-export function computeWindowLevelFromDrag(startLevel: number, startX: number, clientX: number): number {
-  const newLevel = startLevel + (clientX - startX) * WINDOW_LEVEL_PER_PIXEL;
+// scale multiplies the drag sensitivity, for volumes whose values span a different range than CT.
+export function computeWindowLevelFromDrag(startLevel: number, startX: number, clientX: number, scale = 1): number {
+  const newLevel = startLevel + (clientX - startX) * WINDOW_LEVEL_PER_PIXEL * scale;
   return clamp(newLevel, MIN_WINDOW_LEVEL, MAX_WINDOW_LEVEL);
 }
 
-export function computeWindowWidthFromDrag(startWidth: number, startY: number, clientY: number): number {
-  const newWidth = startWidth + (startY - clientY) * WINDOW_WIDTH_PER_PIXEL;
+export function computeWindowWidthFromDrag(startWidth: number, startY: number, clientY: number, scale = 1): number {
+  const newWidth = startWidth + (startY - clientY) * WINDOW_WIDTH_PER_PIXEL * scale;
   return clamp(newWidth, MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH);
 }
 

@@ -1,8 +1,10 @@
 import type { Coordinate, ViewablePlane } from '../utils/canvasMath';
 import { dot, type Ray } from './camera';
-import type { Box } from './volumeGrid';
+import type { Box } from '../utils/volumeGeometry';
+import { applyAffine, applyLinear } from './affine';
+import type { VolumeGrid } from './volumeGrid';
 
-// Fractions (0–1) of the volume's extent along each patient axis.
+// Fractions (0–1) of the volume's patient-space bounding box along each patient axis.
 export interface ClipBox {
   min: Coordinate;
   max: Coordinate;
@@ -31,15 +33,14 @@ export function cutPlaneFromViewablePlane(plane: ViewablePlane, flip: boolean): 
   return { normal, offsetMm: dot(normal, plane.positionXyz) };
 }
 
-// Parameter range of the ray inside the box and the cut plane's kept half-space; mirrors raycast.frag.
-export function rayInterval(ray: Ray, box: Box, cut: CutPlane | null, clampToOrigin: boolean): [number, number] | null {
-  let near = clampToOrigin ? 0 : -Infinity;
+function intersectBox(origin: Coordinate, direction: Coordinate, box: Box): [number, number] {
+  let near = -Infinity;
   let far = Infinity;
   for (const axis of ['x', 'y', 'z'] as const) {
-    const d = ray.direction[axis];
-    const o = ray.origin[axis];
+    const d = direction[axis];
+    const o = origin[axis];
     if (Math.abs(d) < 1e-9) {
-      if (o < box.min[axis] || o > box.max[axis]) return null;
+      if (o < box.min[axis] || o > box.max[axis]) return [1, 0];
       continue;
     }
     const t0 = (box.min[axis] - o) / d;
@@ -47,6 +48,22 @@ export function rayInterval(ray: Ray, box: Box, cut: CutPlane | null, clampToOri
     near = Math.max(near, Math.min(t0, t1));
     far = Math.min(far, Math.max(t0, t1));
   }
+  return [near, far];
+}
+
+// Range of the patient-space ray parameter inside the volume, the clip box and the cut plane's kept half-space;
+// mirrors raycast.frag.
+export function rayInterval(
+  ray: Ray,
+  grid: VolumeGrid,
+  clip: ClipBox,
+  cut: CutPlane | null,
+  clampToOrigin: boolean
+): [number, number] | null {
+  const voxel = intersectBox(applyAffine(grid.patientToVoxel, ray.origin), applyLinear(grid.patientToVoxel, ray.direction), grid.voxelBox);
+  const clipped = intersectBox(ray.origin, ray.direction, clippedBox(grid.bounds, clip));
+  let near = Math.max(voxel[0], clipped[0], clampToOrigin ? 0 : -Infinity);
+  let far = Math.min(voxel[1], clipped[1]);
   if (cut) {
     const denominator = dot(cut.normal, ray.direction);
     const distance = cut.offsetMm - dot(cut.normal, ray.origin);

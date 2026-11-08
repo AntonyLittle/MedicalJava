@@ -1,8 +1,15 @@
 export type RgbColor = [number, number, number];
 
 // alpha is the opacity of 1 mm of material; the shader corrects it for the actual step length.
-export interface TransferPoint {
+export interface PresetPoint {
   hu: number;
+  color: RgbColor;
+  alpha: number;
+}
+
+// A point of a transfer function over stored volume values.
+export interface TransferPoint {
+  value: number;
   color: RgbColor;
   alpha: number;
 }
@@ -10,7 +17,7 @@ export interface TransferPoint {
 export interface TransferPreset {
   id: string;
   name: string;
-  points: TransferPoint[];
+  points: PresetPoint[];
 }
 
 const SKIN: RgbColor = [0.93, 0.75, 0.62];
@@ -20,6 +27,7 @@ const VESSEL: RgbColor = [0.85, 0.12, 0.1];
 const LUNG: RgbColor = [0.95, 0.65, 0.55];
 
 // Points are in ascending HU; values outside the first/last point take the end values.
+// Presets need Hounsfield units, so they apply to CT volumes only.
 export const TRANSFER_PRESETS: TransferPreset[] = [
   {
     id: 'bone',
@@ -77,45 +85,56 @@ export const TRANSFER_PRESETS: TransferPreset[] = [
   },
 ];
 
-// The store keeps raw CT pixel values: the usual rescale intercept of -1024 is not applied, so HU = value - 1024.
-export const CT_VALUE_OFFSET = 1024;
-
-// The LUT is indexed by stored value and covers -1024..3071 HU at 2 per entry; values outside take the end entries.
-export const LUT_MIN_VALUE = 0;
-export const LUT_STEP = 2;
-export const LUT_SIZE = 2048;
+export const LUT_SIZE = 4096;
 
 export interface TransferLut {
-  // RGBA8 texture data.
+  // RGBA8 texture data; entry i is for stored value minValue + i * step.
   rgba: Uint8Array;
+  minValue: number;
+  step: number;
   // Opacity per entry exactly as the GPU sees it (rgba alpha / 255).
   alpha: Float32Array;
   // visibleCount[i] = number of entries before i with non-zero opacity.
   visibleCount: Int32Array;
 }
 
-function interpolate(points: TransferPoint[], hu: number): { color: RgbColor; alpha: number } {
-  if (hu <= points[0].hu) return points[0];
+// Hounsfield presets as points over stored values; shiftHu moves the whole preset along the HU axis.
+export function presetPoints(preset: TransferPreset, shiftHu: number, huToStored: (hu: number) => number): TransferPoint[] {
+  return preset.points.map((p) => ({ value: huToStored(p.hu + shiftHu), color: p.color, alpha: p.alpha }));
+}
+
+// For data without a calibrated scale: transparent below the window, rising to fairly opaque at its top.
+export function windowRampPoints(low: number, high: number): TransferPoint[] {
+  return [
+    { value: low, color: [0.55, 0.45, 0.4], alpha: 0 },
+    { value: low + (high - low) * 0.5, color: [0.85, 0.7, 0.6], alpha: 0.08 },
+    { value: high, color: [1, 0.97, 0.92], alpha: 0.6 },
+  ];
+}
+
+function interpolate(points: TransferPoint[], value: number): { color: RgbColor; alpha: number } {
+  if (value <= points[0].value) return points[0];
   const last = points[points.length - 1];
-  if (hu >= last.hu) return last;
+  if (value >= last.value) return last;
   let i = 1;
-  while (points[i].hu < hu) i++;
+  while (points[i].value < value) i++;
   const a = points[i - 1];
   const b = points[i];
-  const t = (hu - a.hu) / (b.hu - a.hu);
+  const t = b.value > a.value ? (value - a.value) / (b.value - a.value) : 1;
   return {
     color: [0, 1, 2].map((c) => a.color[c] + (b.color[c] - a.color[c]) * t) as RgbColor,
     alpha: a.alpha + (b.alpha - a.alpha) * t,
   };
 }
 
-// Preset points are in HU; shiftHu moves the whole preset along the HU axis.
-export function buildTransferLut(preset: TransferPreset, shiftHu: number): TransferLut {
+// Points must be in ascending value order; the table spans the volume's stored range [minValue, maxValue].
+export function buildTransferLut(points: TransferPoint[], minValue: number, maxValue: number): TransferLut {
+  const step = Math.max(1e-6, (maxValue - minValue) / (LUT_SIZE - 1));
   const rgba = new Uint8Array(LUT_SIZE * 4);
   const alpha = new Float32Array(LUT_SIZE);
   const visibleCount = new Int32Array(LUT_SIZE + 1);
   for (let i = 0; i < LUT_SIZE; i++) {
-    const { color, alpha: a } = interpolate(preset.points, LUT_MIN_VALUE + i * LUT_STEP - CT_VALUE_OFFSET - shiftHu);
+    const { color, alpha: a } = interpolate(points, minValue + i * step);
     rgba[i * 4] = Math.round(color[0] * 255);
     rgba[i * 4 + 1] = Math.round(color[1] * 255);
     rgba[i * 4 + 2] = Math.round(color[2] * 255);
@@ -123,17 +142,17 @@ export function buildTransferLut(preset: TransferPreset, shiftHu: number): Trans
     alpha[i] = rgba[i * 4 + 3] / 255;
     visibleCount[i + 1] = visibleCount[i] + (rgba[i * 4 + 3] > 0 ? 1 : 0);
   }
-  return { rgba, alpha, visibleCount };
+  return { rgba, minValue, step, alpha, visibleCount };
 }
 
 // Fractional LUT position of a stored value, clamped to the table.
-export function lutPosition(value: number): number {
-  return Math.min(LUT_SIZE - 1, Math.max(0, (value - LUT_MIN_VALUE) / LUT_STEP));
+export function lutPosition(lut: TransferLut, value: number): number {
+  return Math.min(LUT_SIZE - 1, Math.max(0, (value - lut.minValue) / lut.step));
 }
 
 // Opacity the GPU's linear LUT lookup gives for a stored value.
 export function lutAlpha(lut: TransferLut, value: number): number {
-  const position = lutPosition(value);
+  const position = lutPosition(lut, value);
   const i = Math.floor(position);
   const j = Math.min(LUT_SIZE - 1, i + 1);
   const t = position - i;
@@ -142,7 +161,7 @@ export function lutAlpha(lut: TransferLut, value: number): number {
 
 // Whether any stored value in [min, max] can be visible (including blending with the neighbouring entries).
 export function lutRangeVisible(lut: TransferLut, min: number, max: number): boolean {
-  const lo = Math.max(0, Math.floor(lutPosition(min)) - 1);
-  const hi = Math.min(LUT_SIZE - 1, Math.ceil(lutPosition(max)) + 1);
+  const lo = Math.max(0, Math.floor(lutPosition(lut, min)) - 1);
+  const hi = Math.min(LUT_SIZE - 1, Math.ceil(lutPosition(lut, max)) + 1);
   return lut.visibleCount[hi + 1] - lut.visibleCount[lo] > 0;
 }

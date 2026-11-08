@@ -24,15 +24,17 @@ uniform vec3 uCamForward;
 uniform vec2 uHalfSizeMm;
 uniform float uPerspectiveDistanceMm;
 
-// Volume: texture coordinate = p * uTexScale + uTexOffset.
+// The volume keeps its acquisition orientation: patient points map to voxel coordinates (fractional grid indices)
+// through an affine transform. Rays are parametrised by patient distance t (mm) and marched in voxel coordinates.
 uniform sampler3D uVolume;
-uniform vec3 uTexScale;
-uniform vec3 uTexOffset;
-uniform vec3 uSpacingMm;
+uniform mat4 uPatientToVoxel;
+uniform vec3 uDims;
+uniform vec3 uVoxelBoxMin;
+uniform vec3 uVoxelBoxMax;
 
-// Region to march: volume box ∩ clip box, then the cut plane's half-space dot(n, p) <= w.
-uniform vec3 uBoxMin;
-uniform vec3 uBoxMax;
+// Clipping in patient space: the clip box, then the cut plane's half-space dot(n, p) <= w.
+uniform vec3 uClipMin;
+uniform vec3 uClipMax;
 uniform bool uCutEnabled;
 uniform vec4 uCutPlane;
 
@@ -42,8 +44,7 @@ uniform int uMaxSteps;
 // Empty-space skipping: one 0/1 texel per brick of voxels.
 uniform bool uSkipEmpty;
 uniform usampler3D uOccupancy;
-uniform vec3 uGridOrigin;
-uniform vec3 uBrickSizeMm;
+uniform float uBrickSize;
 uniform ivec3 uBrickDims;
 
 // DVR: LUT lookup x = value * uLutScale + uLutOffset; LUT alpha is opacity per mm.
@@ -60,19 +61,18 @@ uniform float uWindowHigh;
 uniform float uIsoValue;
 uniform vec3 uIsoColor;
 
-float sampleAt(vec3 p) {
-  return texture(uVolume, p * uTexScale + uTexOffset).r;
+float sampleAt(vec3 v) {
+  return texture(uVolume, (v + 0.5) / uDims).r;
 }
 
-vec3 gradientAt(vec3 p) {
-  vec3 dx = vec3(uSpacingMm.x, 0.0, 0.0);
-  vec3 dy = vec3(0.0, uSpacingMm.y, 0.0);
-  vec3 dz = vec3(0.0, 0.0, uSpacingMm.z);
-  return vec3(
-    sampleAt(p + dx) - sampleAt(p - dx),
-    sampleAt(p + dy) - sampleAt(p - dy),
-    sampleAt(p + dz) - sampleAt(p - dz)
-  ) / (2.0 * uSpacingMm);
+// Patient-space gradient (value per mm) from central differences along the voxel axes.
+vec3 gradientAt(vec3 v) {
+  vec3 perVoxel = 0.5 * vec3(
+    sampleAt(v + vec3(1.0, 0.0, 0.0)) - sampleAt(v - vec3(1.0, 0.0, 0.0)),
+    sampleAt(v + vec3(0.0, 1.0, 0.0)) - sampleAt(v - vec3(0.0, 1.0, 0.0)),
+    sampleAt(v + vec3(0.0, 0.0, 1.0)) - sampleAt(v - vec3(0.0, 0.0, 1.0))
+  );
+  return transpose(mat3(uPatientToVoxel)) * perVoxel;
 }
 
 // Headlight Blinn-Phong; two-sided because gradients point into denser material.
@@ -94,20 +94,19 @@ vec2 intersectBox(vec3 origin, vec3 dir, vec3 boxMin, vec3 boxMax) {
   return vec2(max(max(tMin.x, tMin.y), tMin.z), min(min(tMax.x, tMax.y), tMax.z));
 }
 
-ivec3 brickAt(vec3 p) {
-  return clamp(ivec3(floor((p - uGridOrigin) / uBrickSizeMm)), ivec3(0), uBrickDims - 1);
+ivec3 brickAt(vec3 v) {
+  return clamp(ivec3(floor(v / uBrickSize)), ivec3(0), uBrickDims - 1);
 }
 
-// Next sample position on the step grid past the exit of the brick containing p.
-float skipBrick(vec3 origin, vec3 dir, float t, ivec3 brick) {
-  vec3 lo = uGridOrigin + vec3(brick) * uBrickSizeMm;
-  vec3 hi = lo + uBrickSizeMm;
-  float exitT = intersectBox(origin, dir, lo, hi).y;
+// Next sample position on the step grid past the exit of the brick containing the voxel point.
+float skipBrick(vec3 voxelOrigin, vec3 voxelDir, float t, ivec3 brick) {
+  vec3 lo = vec3(brick) * uBrickSize;
+  float exitT = intersectBox(voxelOrigin, voxelDir, lo, lo + uBrickSize).y;
   return t + max(1.0, ceil((exitT - t) / uStepMm)) * uStepMm;
 }
 
-bool brickEmpty(vec3 p) {
-  return texelFetch(uOccupancy, brickAt(p), 0).r == 0u;
+bool brickEmpty(vec3 v) {
+  return texelFetch(uOccupancy, brickAt(v), 0).r == 0u;
 }
 
 float hash(vec2 p) {
@@ -126,8 +125,12 @@ void main() {
     origin = uCamTarget + offset;
     dir = uCamForward;
   }
+  vec3 voxelOrigin = (uPatientToVoxel * vec4(origin, 1.0)).xyz;
+  vec3 voxelDir = mat3(uPatientToVoxel) * dir;
 
-  vec2 range = intersectBox(origin, dir, uBoxMin, uBoxMax);
+  vec2 range = intersectBox(voxelOrigin, voxelDir, uVoxelBoxMin, uVoxelBoxMax);
+  vec2 clip = intersectBox(origin, dir, uClipMin, uClipMax);
+  range = vec2(max(range.x, clip.x), min(range.y, clip.y));
   if (perspective) range.x = max(range.x, 0.0);
   if (uCutEnabled) {
     float denominator = dot(uCutPlane.xyz, dir);
@@ -152,19 +155,19 @@ void main() {
     vec4 accumulated = vec4(0.0);
     for (int i = 0; i < uMaxSteps; i++) {
       if (t > range.y) break;
-      vec3 p = origin + dir * t;
-      if (uSkipEmpty && brickEmpty(p)) {
-        t = skipBrick(origin, dir, t, brickAt(p));
+      vec3 v = voxelOrigin + voxelDir * t;
+      if (uSkipEmpty && brickEmpty(v)) {
+        t = skipBrick(voxelOrigin, voxelDir, t, brickAt(v));
         continue;
       }
-      float value = sampleAt(p);
+      float value = sampleAt(v);
       vec4 sampleColor = texture(uTransfer, vec2(value * uLutScale + uLutOffset, 0.5));
       if (sampleColor.a > 0.0) {
         float alphaPerMm = min(0.999, sampleColor.a * uOpacityScale);
         float alpha = 1.0 - pow(1.0 - alphaPerMm, uStepMm);
         vec3 color = sampleColor.rgb;
         if (uShading > 0.0) {
-          vec3 gradient = gradientAt(p);
+          vec3 gradient = gradientAt(v);
           float edge = smoothstep(5.0, 60.0, length(gradient));
           color = mix(color, shade(color, gradient, viewDir, 0.3, 0.25), uShading * edge);
         }
@@ -180,14 +183,14 @@ void main() {
     bool first = true;
     for (int i = 0; i < uMaxSteps; i++) {
       if (t > range.y) break;
-      vec3 p = origin + dir * t;
-      if (uSkipEmpty && brickEmpty(p)) {
-        t = skipBrick(origin, dir, t, brickAt(p));
+      vec3 v = voxelOrigin + voxelDir * t;
+      if (uSkipEmpty && brickEmpty(v)) {
+        t = skipBrick(voxelOrigin, voxelDir, t, brickAt(v));
         previousT = t - uStepMm;
         first = false;
         continue;
       }
-      if (sampleAt(p) >= uIsoValue) {
+      if (sampleAt(v) >= uIsoValue) {
         float hitT = t;
         if (!first) {
           // Refine between the last sample below the threshold and this one.
@@ -195,12 +198,12 @@ void main() {
           float hi = t;
           for (int j = 0; j < 6; j++) {
             float mid = 0.5 * (lo + hi);
-            if (sampleAt(origin + dir * mid) >= uIsoValue) hi = mid;
+            if (sampleAt(voxelOrigin + voxelDir * mid) >= uIsoValue) hi = mid;
             else lo = mid;
           }
           hitT = hi;
         }
-        vec3 hit = origin + dir * hitT;
+        vec3 hit = voxelOrigin + voxelDir * hitT;
         outColor = vec4(shade(uIsoColor, gradientAt(hit), viewDir, 0.2, 0.3), 1.0);
         return;
       }
@@ -215,13 +218,13 @@ void main() {
     bool skipped = false;
     for (int i = 0; i < uMaxSteps; i++) {
       if (t > range.y) break;
-      vec3 p = origin + dir * t;
-      if (uSkipEmpty && brickEmpty(p)) {
-        t = skipBrick(origin, dir, t, brickAt(p));
+      vec3 v = voxelOrigin + voxelDir * t;
+      if (uSkipEmpty && brickEmpty(v)) {
+        t = skipBrick(voxelOrigin, voxelDir, t, brickAt(v));
         skipped = true;
         continue;
       }
-      float value = sampleAt(p);
+      float value = sampleAt(v);
       extreme = uMode == MODE_MINIP ? min(extreme, value) : max(extreme, value);
       sum += value;
       count += 1.0;

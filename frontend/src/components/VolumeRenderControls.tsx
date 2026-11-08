@@ -25,7 +25,8 @@ export interface VolumeRenderSettings {
   shiftHu: number;
   opacityScale: number;
   shading: boolean;
-  isoValue: number;
+  // Surface threshold in real units; null until set, for the volume's default.
+  isoValue: number | null;
   projection: Projection;
   quality: RenderQuality;
   clipBox: ClipBox;
@@ -38,15 +39,24 @@ export const MIN_SHIFT_HU = -500;
 export const MAX_SHIFT_HU = 500;
 export const MIN_OPACITY_SCALE = 0.1;
 export const MAX_OPACITY_SCALE = 4;
-export const MIN_ISO_HU = -1000;
-export const MAX_ISO_HU = 3000;
 
 const AXIS_LABELS: Record<keyof Coordinate, string> = { x: 'Right–Left', y: 'Anterior–Posterior', z: 'Inferior–Superior' };
 
 interface VolumeRenderControlsProps {
   settings: VolumeRenderSettings;
+  // Threshold in use and the volume's value range, in real units.
+  isoValue: number;
+  valueRange: [number, number];
+  units: string;
+  // Presets need Hounsfield units; other data ramps opacity across the shared window instead.
+  hounsfield: boolean;
   onChange: (update: Partial<VolumeRenderSettings>) => void;
   onResetView: () => void;
+}
+
+function formatValue(value: number, units: string): string {
+  const text = Math.abs(value) >= 100 || Number.isInteger(value) ? `${Math.round(value)}` : value.toPrecision(3);
+  return units ? `${text} ${units}` : text;
 }
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -60,7 +70,16 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-export function VolumeRenderControls({ settings, onChange, onResetView }: VolumeRenderControlsProps) {
+export function VolumeRenderControls({
+  settings,
+  isoValue,
+  valueRange,
+  units,
+  hounsfield,
+  onChange,
+  onResetView,
+}: VolumeRenderControlsProps) {
+  const isoStep = valueRange[1] - valueRange[0] > 200 ? 1 : (valueRange[1] - valueRange[0]) / 200;
   const { mode, clipBox } = settings;
   const setClip = (axis: keyof Coordinate, [lo, hi]: number[]) =>
     onChange({
@@ -87,7 +106,29 @@ export function VolumeRenderControls({ settings, onChange, onResetView }: Volume
         </ToggleButtonGroup>
       </Section>
 
-      {mode === 'dvr' && (
+      {mode === 'dvr' && !hounsfield && (
+        <>
+          <Typography variant="body2" color="text.secondary">
+            No Hounsfield scale: opacity ramps across the shared window level/width.
+          </Typography>
+          <Section title={`Opacity: ×${settings.opacityScale.toFixed(2)}`}>
+            <Slider
+              size="small"
+              min={MIN_OPACITY_SCALE}
+              max={MAX_OPACITY_SCALE}
+              step={0.05}
+              value={settings.opacityScale}
+              onChange={(_, value) => onChange({ opacityScale: value as number })}
+            />
+          </Section>
+          <FormControlLabel
+            control={<Switch size="small" checked={settings.shading} onChange={(_, checked) => onChange({ shading: checked })} />}
+            label="Shading"
+          />
+        </>
+      )}
+
+      {mode === 'dvr' && hounsfield && (
         <>
           <Section title="Preset">
             <ToggleButtonGroup
@@ -131,12 +172,13 @@ export function VolumeRenderControls({ settings, onChange, onResetView }: Volume
       )}
 
       {mode === 'iso' && (
-        <Section title={`Threshold: ${settings.isoValue} HU`}>
+        <Section title={`Threshold: ${formatValue(isoValue, units)}`}>
           <Slider
             size="small"
-            min={MIN_ISO_HU}
-            max={MAX_ISO_HU}
-            value={settings.isoValue}
+            min={valueRange[0]}
+            max={valueRange[1]}
+            step={isoStep}
+            value={isoValue}
             onChange={(_, value) => onChange({ isoValue: value as number })}
           />
         </Section>

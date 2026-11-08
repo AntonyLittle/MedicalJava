@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, type RefObject } from 'react';
-import { clampToBounds, computeWheelDistanceMm, moveViewablePlaneForward } from '../utils/canvasMath';
+import { useEffect, useRef, type RefObject } from 'react';
+import { computeWheelDistanceMm, moveViewablePlaneForward } from '../utils/canvasMath';
 import type { ViewablePlane } from '../utils/canvasMath';
 import type { Volume } from '../api/types';
-import { getVolumeBounds } from '../utils/mprSampler';
+import { clampToVolume } from '../utils/volumeGeometry';
 
 // React's synthetic onWheel is passive, so preventDefault() there can't stop page scroll;
 // a native listener with { passive: false } is required instead.
@@ -14,15 +14,13 @@ export function useWheelDistanceScroll(
 ): void {
   const pendingDeltaRef = useRef(0);
 
-  const bounds = useMemo(() => getVolumeBounds(volume), [volume]);
-
   // Kept fresh every render so the listener (registered once below) always sees current values.
   const viewablePlaneRef = useRef(viewablePlane);
-  const boundsRef = useRef(bounds);
+  const volumeRef = useRef(volume);
   const onViewablePlaneChangeRef = useRef(onViewablePlaneChange);
   useEffect(() => {
     viewablePlaneRef.current = viewablePlane;
-    boundsRef.current = bounds;
+    volumeRef.current = volume;
     onViewablePlaneChangeRef.current = onViewablePlaneChange;
   });
 
@@ -40,8 +38,7 @@ export function useWheelDistanceScroll(
       if (distanceMm === 0) return;
 
       const moved = moveViewablePlaneForward(viewablePlaneRef.current, distanceMm);
-      const { min, max } = boundsRef.current;
-      const next = { ...moved, positionXyz: clampToBounds(moved.positionXyz, min, max) };
+      const next = { ...moved, positionXyz: clampToVolume(volumeRef.current, moved.positionXyz) };
 
       // The prop only catches up after React renders, so later frames must build on this value.
       viewablePlaneRef.current = next;

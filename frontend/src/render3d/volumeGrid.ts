@@ -1,22 +1,25 @@
-import type { Slice, Volume } from '../api/types';
+import type { Volume } from '../api/types';
 import type { Coordinate } from '../utils/canvasMath';
+import { volumeGeometry, type Box } from '../utils/volumeGeometry';
+import { affineFromColumns, applyAffine, invertAffine, type Affine } from './affine';
 
 // Edge length, in voxels, of the blocks used for empty-space skipping; a power of two.
 const BRICK_SHIFT = 3;
 export const BRICK_SIZE = 1 << BRICK_SHIFT;
 
-export interface Box {
-  min: Coordinate;
-  max: Coordinate;
-}
-
-// A regular voxel grid in patient space (mm); voxel (i, j, k) is centred at origin + (i, j, k) * spacing.
+// A regular voxel grid in the volume's own (possibly oblique or sheared) frame. Voxel coordinates are fractional
+// grid indices: voxel (i, j, k) is centred at voxelToPatient·(i, j, k).
 export interface VolumeGrid {
   dims: [number, number, number];
-  origin: Coordinate;
+  // Millimetres between neighbouring voxels along each grid axis.
   spacing: Coordinate;
-  // Region rays are marched through: the voxel centres, widened by half a voxel along single-voxel axes.
-  box: Box;
+  voxelToPatient: Affine;
+  patientToVoxel: Affine;
+  // Region rays are marched through, in voxel coordinates: the voxel centres, widened by half a voxel along
+  // single-voxel axes.
+  voxelBox: Box;
+  // Patient-space box around voxelBox; the clip box is a fraction of it.
+  bounds: Box;
 }
 
 // Value range of each brick, widened to include its neighbours so that interpolation and gradient samples
@@ -44,14 +47,28 @@ function lowerIndex(sortedValues: number[], value: number): number {
   return lo;
 }
 
+function boxAround(points: Coordinate[]): Box {
+  const min = { x: Infinity, y: Infinity, z: Infinity };
+  const max = { x: -Infinity, y: -Infinity, z: -Infinity };
+  for (const p of points) {
+    for (const axis of ['x', 'y', 'z'] as const) {
+      min[axis] = Math.min(min[axis], p[axis]);
+      max[axis] = Math.max(max[axis], p[axis]);
+    }
+  }
+  return { min, max };
+}
+
 // Maps the volume's slices onto a regular grid no bigger than maxSize along any axis. Evenly spaced slices are used
-// as they are; uneven ones are resampled to evenly spaced depths, and oversized axes are decimated.
+// as they are; uneven ones are resampled to evenly spaced depths, and oversized axes are decimated. The grid keeps
+// the acquisition's orientation (and any gantry-tilt shear); voxelToPatient places it in patient space.
 export function planVolumeGrid(volume: Volume, maxSize: number): GridSampler {
   if (volume.slices.length === 0) throw new Error('Volume has no slices');
-  const slices: Slice[] = [...volume.slices].sort((a, b) => a.depthPositionMm - b.depthPositionMm);
+  const geometry = volumeGeometry(volume);
+  const slices = volume.slices;
   const first = slices[0];
   const sourceWidth = first.widthPixels;
-  const depths = slices.map((s) => s.depthPositionMm);
+  const depths = geometry.depths;
   const count = slices.length;
 
   const strideX = Math.ceil(sourceWidth / maxSize);
@@ -59,40 +76,55 @@ export function planVolumeGrid(volume: Volume, maxSize: number): GridSampler {
   const nx = Math.floor((sourceWidth - 1) / strideX) + 1;
   const ny = Math.floor((first.heightPixels - 1) / strideY) + 1;
 
-  const zMin = depths[0];
-  const zMax = depths[count - 1];
-  const extentZ = zMax - zMin;
-  const step = count > 1 ? extentZ / (count - 1) : 0;
-  const evenlySpaced = step > 0 && depths.every((d, i) => Math.abs(d - (zMin + i * step)) <= 1e-3 * step);
+  const extentZ = depths[count - 1];
   const nz = extentZ <= 1e-6 ? 1 : Math.min(count, maxSize);
-  const direct = nz === count && (count === 1 || evenlySpaced);
+  const direct = nz === count && (count === 1 || geometry.depthStep > 0);
 
   const spacing = {
-    x: first.pixelSpacingXMm * strideX,
-    y: first.pixelSpacingYMm * strideY,
-    z: nz > 1 ? extentZ / (nz - 1) : Math.min(first.pixelSpacingXMm, first.pixelSpacingYMm),
+    x: geometry.spacingX * strideX,
+    y: geometry.spacingY * strideY,
+    z: nz > 1 ? extentZ / (nz - 1) : Math.min(geometry.spacingX, geometry.spacingY),
   };
-  const origin = { x: first.originXMm, y: first.originYMm, z: zMin };
   const dims: [number, number, number] = [nx, ny, nz];
-  const half = (n: number, s: number) => (n === 1 ? s / 2 : 0);
-  const box: Box = {
-    min: {
-      x: origin.x - half(nx, spacing.x),
-      y: origin.y - half(ny, spacing.y),
-      z: origin.z - half(nz, spacing.z),
-    },
-    max: {
-      x: origin.x + (nx - 1) * spacing.x + half(nx, spacing.x),
-      y: origin.y + (ny - 1) * spacing.y + half(ny, spacing.y),
-      z: origin.z + (nz - 1) * spacing.z + half(nz, spacing.z),
-    },
+
+  const { right, down, normal, shear } = geometry;
+  const stackStep: Coordinate = {
+    x: (normal.x + right.x * shear.x + down.x * shear.y) * spacing.z,
+    y: (normal.y + right.y * shear.x + down.y * shear.y) * spacing.z,
+    z: (normal.z + right.z * shear.x + down.z * shear.y) * spacing.z,
+  };
+  const voxelToPatient = affineFromColumns(
+    { x: right.x * spacing.x, y: right.y * spacing.x, z: right.z * spacing.x },
+    { x: down.x * spacing.y, y: down.y * spacing.y, z: down.z * spacing.y },
+    stackStep,
+    geometry.origin
+  );
+  const half = (n: number) => (n === 1 ? 0.5 : 0);
+  const voxelBox: Box = {
+    min: { x: -half(nx), y: -half(ny), z: -half(nz) },
+    max: { x: nx - 1 + half(nx), y: ny - 1 + half(ny), z: nz - 1 + half(nz) },
+  };
+  const corners = Array.from({ length: 8 }, (_, i) =>
+    applyAffine(voxelToPatient, {
+      x: i & 1 ? voxelBox.max.x : voxelBox.min.x,
+      y: i & 2 ? voxelBox.max.y : voxelBox.min.y,
+      z: i & 4 ? voxelBox.max.z : voxelBox.min.z,
+    })
+  );
+  const grid: VolumeGrid = {
+    dims,
+    spacing,
+    voxelToPatient,
+    patientToVoxel: invertAffine(voxelToPatient),
+    voxelBox,
+    bounds: boxAround(corners),
   };
 
   const fillSlice = (k: number, out: Float32Array) => {
     let lower = k;
     let t = 0;
     if (!direct) {
-      const z = zMin + k * spacing.z;
+      const z = k * spacing.z;
       lower = lowerIndex(depths, z);
       const upper = Math.min(count - 1, lower + 1);
       const span = depths[upper] - depths[lower];
@@ -119,7 +151,7 @@ export function planVolumeGrid(volume: Volume, maxSize: number): GridSampler {
     }
   };
 
-  return { grid: { dims, origin, spacing, box }, fillSlice };
+  return { grid, fillSlice };
 }
 
 export function createBrickStats(grid: VolumeGrid): BrickStats {

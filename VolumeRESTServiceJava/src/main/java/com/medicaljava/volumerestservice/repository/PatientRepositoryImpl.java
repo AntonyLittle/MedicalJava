@@ -59,15 +59,12 @@ public class PatientRepositoryImpl implements PatientRepository {
             for (var slice : volume.slices()) {
                 var radiodensities = new short[slice.widthPixels() * slice.heightPixels()];
                 pixels.get(radiodensities);
-                slices.add(new Slice(slice.sliceId(), slice.volumeId(), slice.patientId(), slice.index(),
-                        slice.widthPixels(), slice.heightPixels(), slice.widthMm(), slice.heightMm(),
-                        slice.depthPositionMm(), slice.originXMm(), slice.originYMm(),
-                        slice.pixelSpacingXMm(), slice.pixelSpacingYMm(), radiodensities));
+                slices.add(slice.withPixels(radiodensities));
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        return volume.withSlicesAndSpatial(slices, volume.width(), volume.height(), volume.depth());
+        return volume.withSlices(slices);
     }
 
     /**

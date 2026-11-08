@@ -4,14 +4,28 @@ export interface Patient {
   volumes: Volume[];
 }
 
+// Slices are parallel images ordered along rowDirection × columnDirection (patient LPS unit vectors).
+// Pixel values map to real values (in valueUnits, e.g. 'HU') as value * valueSlope + valueIntercept;
+// minValue/maxValue are the real range. formatVersion 0 marks a volume stored before orientation and value
+// mapping were decoded (it is treated as an axial stack of raw values).
 export interface Volume {
   volumeId: number;
   patientId: number;
   name: string;
   modality: string;
   slices: Slice[];
+  rowDirection?: [number, number, number];
+  columnDirection?: [number, number, number];
+  valueSlope?: number;
+  valueIntercept?: number;
+  valueUnits?: string;
+  minValue?: number;
+  maxValue?: number;
+  formatVersion?: number;
 }
 
+// position*Mm is the patient-space centre of the first pixel. depthPositionMm (distance along the slice normal)
+// and originX/YMm are kept for axial-only clients; use utils/volumeGeometry instead.
 export interface Slice extends RadioDensities{
   radiodensities: Int16Array;
   sliceId: number;
@@ -25,6 +39,9 @@ export interface Slice extends RadioDensities{
   originYMm: number;
   pixelSpacingXMm: number;
   pixelSpacingYMm: number;
+  positionXMm?: number;
+  positionYMm?: number;
+  positionZMm?: number;
 }
 
 // Maps patient-space plane coordinates (mm from the volume centre along the image's right/down axes) to pixels.

@@ -8,17 +8,29 @@ import { useWlwwDrag } from '../hooks/useWlwwDrag';
 import { projectToCanvas, rayForPixel, type CameraFrame } from '../render3d/camera';
 import { cutPlaneFromViewablePlane, FULL_CLIP_BOX } from '../render3d/clipping';
 import { pickPoint } from '../render3d/pick';
-import { buildTransferLut, CT_VALUE_OFFSET, TRANSFER_PRESETS, type RgbColor } from '../render3d/transferFunctions';
+import {
+  buildTransferLut,
+  presetPoints,
+  TRANSFER_PRESETS,
+  windowRampPoints,
+  type RgbColor,
+} from '../render3d/transferFunctions';
 import { VolumeRenderer, type RenderParams } from '../render3d/VolumeRenderer';
 import { clamp, type Coordinate, type MprPlanes } from '../utils/canvasMath';
 import { MPR_COLOR_BY_ORIENTATION } from '../utils/mprColors';
 import { getVolumeBounds, volumeCentre, type PlaneOrientation } from '../utils/mprSampler';
 import { planeIntersectionInVolume, planeOutlineInVolume } from '../utils/planeOverlay';
 import {
-  MAX_ISO_HU,
+  defaultWindow,
+  isHounsfield,
+  realRange,
+  storedRange,
+  toStoredValue,
+  valueUnits,
+} from '../utils/volumeValues';
+import {
   MAX_OPACITY_SCALE,
   MAX_SHIFT_HU,
-  MIN_ISO_HU,
   MIN_OPACITY_SCALE,
   MIN_SHIFT_HU,
   VolumeRenderControls,
@@ -47,6 +59,10 @@ const ISO_COLOR: RgbColor = [0.92, 0.86, 0.76];
 
 // Left+right drag sensitivity for the transfer function and iso threshold.
 const HU_PER_PIXEL = 2;
+// For other units the threshold moves by this fraction of the value range per pixel.
+const RANGE_FRACTION_PER_PIXEL = 1 / 2000;
+// Bone, for CT; other data starts at its default window level.
+const DEFAULT_ISO_HU = 300;
 const OPACITY_EXPONENT_PER_PIXEL = 0.01;
 
 const ORIENTATIONS: PlaneOrientation[] = ['axial', 'coronal', 'sagittal'];
@@ -62,7 +78,7 @@ const DEFAULT_SETTINGS: VolumeRenderSettings = {
   shiftHu: 0,
   opacityScale: 1,
   shading: true,
-  isoValue: 300,
+  isoValue: null,
   projection: 'orthographic',
   quality: 'standard',
   clipBox: FULL_CLIP_BOX,
@@ -71,6 +87,7 @@ const DEFAULT_SETTINGS: VolumeRenderSettings = {
   showMprPlanes: true,
 };
 
+// windowLevel/windowWidth are in stored values, like the other viewers'.
 interface VolumeRenderViewerProps {
   volume: Volume;
   planes: MprPlanes;
@@ -122,6 +139,17 @@ export function VolumeRenderViewer({
   const updateSettings = useCallback((update: Partial<VolumeRenderSettings>) => {
     setSettings((s) => ({ ...s, ...update }));
   }, []);
+  // Thresholds and clip fractions belong to one volume; a newly loaded one starts from its defaults.
+  const [settingsVolume, setSettingsVolume] = useState(volume);
+  if (settingsVolume !== volume) {
+    setSettingsVolume(volume);
+    setSettings((s) => ({ ...s, isoValue: null, clipBox: FULL_CLIP_BOX }));
+  }
+
+  const hounsfield = isHounsfield(volume);
+  const units = valueUnits(volume);
+  const valueRange = useMemo(() => realRange(volume), [volume]);
+  const isoValue = settings.isoValue ?? (hounsfield ? DEFAULT_ISO_HU : defaultWindow(volume).level);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -142,8 +170,21 @@ export function VolumeRenderViewer({
     resetCamera();
   }, [volume, resetCamera]);
 
+  // The window only affects the greyscale modes, and volume rendering of data without Hounsfield units (whose
+  // opacity ramps across the window); ignoring it otherwise avoids needless re-renders.
+  const usesWindow =
+    settings.mode === 'mip' || settings.mode === 'minip' || settings.mode === 'average' || (!hounsfield && settings.mode === 'dvr');
+  const renderWindowLevel = usesWindow ? windowLevel : 0;
+  const renderWindowWidth = usesWindow ? windowWidth : 1;
+
   const preset = TRANSFER_PRESETS.find((p) => p.id === settings.presetId) ?? TRANSFER_PRESETS[0];
-  const lut = useMemo(() => buildTransferLut(preset, settings.shiftHu), [preset, settings.shiftHu]);
+  const lut = useMemo(() => {
+    const [min, max] = storedRange(volume);
+    const points = hounsfield
+      ? presetPoints(preset, settings.shiftHu, (hu) => toStoredValue(volume, hu))
+      : windowRampPoints(renderWindowLevel - renderWindowWidth / 2, renderWindowLevel + renderWindowWidth / 2);
+    return buildTransferLut(points, min, max);
+  }, [volume, hounsfield, preset, settings.shiftHu, renderWindowLevel, renderWindowWidth]);
 
   const cutOrientation = settings.cutPlane;
   const cutViewablePlane = cutOrientation === 'none' ? null : planes[cutOrientation];
@@ -151,11 +192,6 @@ export function VolumeRenderViewer({
     () => (cutViewablePlane ? cutPlaneFromViewablePlane(cutViewablePlane, settings.flipCut) : null),
     [cutViewablePlane, settings.flipCut]
   );
-
-  // The window only affects the greyscale modes; ignoring it otherwise avoids needless re-renders.
-  const usesWindow = settings.mode === 'mip' || settings.mode === 'minip' || settings.mode === 'average';
-  const renderWindowLevel = usesWindow ? windowLevel : 0;
-  const renderWindowWidth = usesWindow ? windowWidth : 1;
 
   const renderParams = useMemo<RenderParams>(
     () => ({
@@ -166,14 +202,14 @@ export function VolumeRenderViewer({
       shading: settings.shading ? 1 : 0,
       windowLevel: renderWindowLevel,
       windowWidth: renderWindowWidth,
-      isoValue: settings.isoValue + CT_VALUE_OFFSET,
+      isoValue: toStoredValue(volume, isoValue),
       isoColor: ISO_COLOR,
       clipBox: settings.clipBox,
       cutPlane,
       stepFactor: STEP_FACTOR[settings.quality],
       skipEmpty: true,
     }),
-    [settings, frame, lut, renderWindowLevel, renderWindowWidth, cutPlane]
+    [settings, frame, lut, renderWindowLevel, renderWindowWidth, cutPlane, volume, isoValue]
   );
 
   // The renderer is created lazily in draw(); losing the context invalidates it, and a restore triggers a redraw.
@@ -249,6 +285,9 @@ export function VolumeRenderViewer({
   const startAdjust = useCallback<DragStarter>(
     (startX, startY) => {
       const start = settings;
+      const startIso = isoValue;
+      const [minValue, maxValue] = valueRange;
+      const perPixel = hounsfield ? HU_PER_PIXEL : (maxValue - minValue) * RANGE_FRACTION_PER_PIXEL;
       return (clientX, clientY) => {
         const dx = clientX - startX;
         const dy = clientY - startY;
@@ -262,11 +301,12 @@ export function VolumeRenderViewer({
             ),
           });
         } else if (start.mode === 'iso') {
-          updateSettings({ isoValue: Math.round(clamp(start.isoValue + dx * HU_PER_PIXEL, MIN_ISO_HU, MAX_ISO_HU)) });
+          const value = clamp(startIso + dx * perPixel, minValue, maxValue);
+          updateSettings({ isoValue: hounsfield ? Math.round(value) : value });
         }
       };
     },
-    [settings, updateSettings]
+    [settings, isoValue, valueRange, hounsfield, updateSettings]
   );
   const handleDrag = usePointerDragMode({
     1: orbit.startRotate,
@@ -286,14 +326,14 @@ export function VolumeRenderViewer({
         mode: settings.mode,
         lut,
         opacityScale: settings.opacityScale,
-        isoValue: settings.isoValue + CT_VALUE_OFFSET,
+        isoValue: toStoredValue(volume, isoValue),
         clipBox: settings.clipBox,
         cutPlane,
         perspective: frame.perspectiveDistanceMm > 0,
       });
       if (point) onMprPositionChange(point);
     },
-    [volume, frame, settings, lut, cutPlane, onMprPositionChange]
+    [volume, frame, settings, isoValue, lut, cutPlane, onMprPositionChange]
   );
 
   // A shift+click picks; the rest of that press is ignored so it doesn't turn into a rotation.
@@ -356,7 +396,15 @@ export function VolumeRenderViewer({
           </Alert>
         )}
       </Box>
-      <VolumeRenderControls settings={settings} onChange={updateSettings} onResetView={resetCamera} />
+      <VolumeRenderControls
+        settings={settings}
+        isoValue={isoValue}
+        valueRange={valueRange}
+        units={units}
+        hounsfield={hounsfield}
+        onChange={updateSettings}
+        onResetView={resetCamera}
+      />
     </Box>
   );
 }

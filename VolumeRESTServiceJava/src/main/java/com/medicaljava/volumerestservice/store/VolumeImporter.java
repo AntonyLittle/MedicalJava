@@ -26,9 +26,12 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.zip.ZipInputStream;
 
 /** Decodes DICOM series once and hands the result to {@link VolumeStore}. */
@@ -37,6 +40,12 @@ public class VolumeImporter {
 
     private static final Logger LOG = LoggerFactory.getLogger(VolumeImporter.class);
     private static final String DEFAULT_MODALITY = "CT";
+
+    /**
+     * Version of the decoding applied to stored volumes. 1 = rescale applied and native orientation kept; data
+     * directory volumes stored by an older version are re-imported by the next scan.
+     */
+    public static final int FORMAT_VERSION = 1;
 
     private final VolumeStore store;
     private final StorePaths paths;
@@ -50,11 +59,13 @@ public class VolumeImporter {
     }
 
     /**
-     * Imports every file in {@code seriesDir} as one volume, as the original directory-backed repository did:
-     * unreadable files are skipped and slices are ordered by depth.
+     * Imports the files in {@code seriesDir} (unreadable ones are skipped) as one volume per stack of parallel
+     * slices. Stacks already stored (by part, in {@code existingParts}) are replaced in place so their ids stay
+     * stable, parts in {@code excludedParts} are skipped, and stored parts the directory no longer produces are
+     * removed.
      */
-    public VolumeKey importDirectory(Path seriesDir, String patientName, String sourcePath, String fingerprint,
-            Integer replaceVolumeId) throws IOException {
+    public List<VolumeKey> importDirectory(Path seriesDir, String patientName, String sourcePath, String fingerprint,
+            Map<String, Integer> existingParts, Set<String> excludedParts) throws IOException {
         var decoded = new ArrayList<DecodedSlice>();
         int sliceIndex = 0;
         for (var file : listSortedFiles(seriesDir)) {
@@ -69,7 +80,25 @@ public class VolumeImporter {
             throw new InvalidDicomException("No readable DICOM images in " + sourcePath);
         }
         var owner = PatientRef.byName(patientName, decoded.getFirst().info().patientId());
-        return save(owner, seriesDir.getFileName().toString(), decoded, sourcePath, fingerprint, replaceVolumeId);
+        var parts = SeriesGeometry.split(decoded);
+
+        var saved = new ArrayList<VolumeKey>();
+        var produced = new HashSet<String>();
+        for (var part : parts) {
+            produced.add(part.key());
+            if (excludedParts.contains(part.key())) {
+                continue;
+            }
+            saved.add(save(owner, partName(seriesDir.getFileName().toString(), part), part, sourcePath, fingerprint,
+                    existingParts.get(part.key())));
+        }
+        existingParts.forEach((key, volumeId) -> {
+            if (!produced.contains(key)) {
+                LOG.info("Removing {} part '{}', which the directory no longer contains", sourcePath, key);
+                store.removeVolume(volumeId);
+            }
+        });
+        return saved;
     }
 
     /**
@@ -102,7 +131,8 @@ public class VolumeImporter {
                 throw new InvalidDicomException("Upload contains no readable DICOM images");
             }
 
-            // Check every series before writing anything so a conflict leaves the store untouched.
+            // Check every series before writing anything so a conflict or invalid geometry leaves the store untouched.
+            var splits = series.values().stream().map(SeriesGeometry::split).toList();
             var owners = new ArrayList<PatientRef>();
             for (var entry : series.entrySet()) {
                 var owner = patientId != null ? PatientRef.byId(patientId) : ownerFromTags(entry.getValue());
@@ -119,7 +149,10 @@ public class VolumeImporter {
             var saved = new ArrayList<VolumeKey>();
             int i = 0;
             for (var slices : series.values()) {
-                saved.add(save(owners.get(i++), uploadVolumeName(slices), slices, null, null, null));
+                var owner = owners.get(i);
+                for (var part : splits.get(i++)) {
+                    saved.add(save(owner, partName(uploadVolumeName(slices), part), part, null, null, null));
+                }
             }
             return saved;
         } finally {
@@ -127,23 +160,32 @@ public class VolumeImporter {
         }
     }
 
-    private VolumeKey save(PatientRef owner, String name, List<DecodedSlice> decoded, String sourcePath,
-            String fingerprint, Integer replaceVolumeId) throws IOException {
-        var slices = new ArrayList<>(decoded.stream().map(DecodedSlice::slice).toList());
-        slices.sort(Comparator.comparingDouble(Slice::depthPositionMm));
+    private static String partName(String name, SeriesGeometry.Part part) {
+        return part.key().isEmpty() ? name : name + " (" + part.label() + ")";
+    }
 
-        var first = slices.getFirst();
-        var last = slices.getLast();
+    private VolumeKey save(PatientRef owner, String name, SeriesGeometry.Part part, String sourcePath,
+            String fingerprint, Integer replaceVolumeId) throws IOException {
+        var decoded = part.slices();
         var info = decoded.getFirst().info();
         var modality = info.modality() == null || info.modality().isBlank() ? DEFAULT_MODALITY : info.modality();
+        var values = PixelValues.encode(decoded, modality);
+
+        // depthPositionMm becomes the distance along the stack's normal, which orders the slices.
+        var normal = part.normal();
+        var slices = decoded.stream()
+                .map(d -> d.slice().withDepthPositionMm(SeriesGeometry.dot(normal, d.plane().position())))
+                .toList();
+        var first = slices.getFirst();
+        var last = slices.getLast();
 
         var tmp = Files.createTempFile(paths.tmp(), "volume-", ".vol");
         try {
             long pixelBytes = writePixels(tmp, slices);
-            var volume = new NewVolume(name, modality, info.seriesInstanceUid(), sourcePath, fingerprint,
+            var volume = new NewVolume(name, modality, info.seriesInstanceUid(), sourcePath, part.key(), fingerprint,
                     (int) first.widthMm(), (int) first.heightMm(),
                     (int) (last.depthPositionMm() - first.depthPositionMm()),
-                    slices, pixelBytes);
+                    part.rowDirection(), part.columnDirection(), values, FORMAT_VERSION, slices, pixelBytes);
             return store.saveVolume(owner, volume, tmp, replaceVolumeId);
         } finally {
             VolumeStore.deleteQuietly(tmp);

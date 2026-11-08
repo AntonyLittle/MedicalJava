@@ -15,13 +15,17 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Imports {@code app.data-dir} (layout: patient/series/*.dcm) into the store. New series are added, series whose
- * files changed are re-imported under the same volume id, and series deleted through the API stay deleted.
+ * files changed (or that were decoded by an older importer) are re-imported under the same volume ids, and volumes
+ * deleted through the API stay deleted. A series acquired in several orientations becomes one volume per stack.
  */
 @Component
 public class DataDirectoryScanner {
@@ -106,7 +110,10 @@ public class DataDirectoryScanner {
             var patientName = patientDir.getFileName().toString();
             for (var seriesDir : listSortedDirs(patientDir)) {
                 var sourcePath = patientName + "/" + seriesDir.getFileName();
-                if (excludedSources.contains(sourcePath)) {
+                var parts = sources.getOrDefault(sourcePath, Map.of());
+                var excludedParts = excludedSources.getOrDefault(sourcePath, Set.of());
+                // Every volume of this directory was deleted through the API.
+                if (parts.isEmpty() && !excludedParts.isEmpty()) {
                     excluded++;
                     continue;
                 }
@@ -120,8 +127,10 @@ public class DataDirectoryScanner {
                     continue;
                 }
 
-                var existing = sources.get(sourcePath);
-                if (existing != null && fingerprint.equals(existing.fingerprint())) {
+                // Volumes stored by an older importer are decoded again even if the files are unchanged.
+                boolean current = !parts.isEmpty() && parts.values().stream().allMatch(
+                        p -> fingerprint.equals(p.fingerprint()) && p.formatVersion() >= VolumeImporter.FORMAT_VERSION);
+                if (current) {
                     unchanged++;
                     continue;
                 }
@@ -132,9 +141,10 @@ public class DataDirectoryScanner {
                 }
 
                 try {
-                    importer.importDirectory(seriesDir, patientName, sourcePath, fingerprint,
-                            existing == null ? null : existing.volumeId());
-                    if (existing == null) {
+                    var partIds = new HashMap<String, Integer>();
+                    parts.forEach((part, state) -> partIds.put(part, state.volumeId()));
+                    importer.importDirectory(seriesDir, patientName, sourcePath, fingerprint, partIds, excludedParts);
+                    if (parts.isEmpty()) {
                         imported++;
                     } else {
                         updated++;

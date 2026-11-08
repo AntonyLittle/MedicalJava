@@ -1,6 +1,18 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react';
 import { buildMprPlanes, IDENTITY_ROTATION, type Coordinate, type Quaternion, type ViewablePlane } from './utils/canvasMath';
-import { getVolumeBounds, type ProjectionMode } from './utils/mprSampler';
+import { volumeCentre, type ProjectionMode } from './utils/mprSampler';
+import { acquisitionPlane } from './utils/volumeGeometry';
+import {
+  defaultWindow,
+  minWindowWidth,
+  realRange,
+  storedRange,
+  toRealValue,
+  toStoredWindow,
+  valueSlope,
+  valueUnits,
+} from './utils/volumeValues';
+import { WindowDragScaleContext, windowDragScale } from './hooks/windowDragScale';
 import { Alert, Box, Button, CircularProgress, Container, Snackbar, Typography } from '@mui/material';
 import { fetchPatients, fetchVolume, fetchVolumes } from './api/client';
 import type { Patient, ScanResult, Volume } from './api/types';
@@ -16,8 +28,9 @@ import { ThickMprControls } from './components/ThickMprControls';
 import { MprOverviewViewer } from './components/MprOverviewViewer';
 import { VolumeRenderViewer } from './components/VolumeRenderViewer';
 
-const DEFAULT_WINDOW_LEVEL = 1000;
-const DEFAULT_WINDOW_WIDTH = 2000;
+// Used until a volume is loaded; each volume then starts with its own default window.
+const DEFAULT_WINDOW_LEVEL = 40;
+const DEFAULT_WINDOW_WIDTH = 400;
 const DEFAULT_SLAB_THICKNESS_MM = 10;
 
 function describeError(e: unknown): string {
@@ -48,6 +61,7 @@ function App() {
   const deferredSlabThicknessMm = useDeferredValue(slabThicknessMm);
   const [projectionMode, setProjectionMode] = useState<ProjectionMode>('average');
 
+  // In real units (e.g. HU); the viewers work on stored values, so they get and report a converted window.
   const [windowLevel, setWindowLevel] = useState(DEFAULT_WINDOW_LEVEL);
   const [windowWidth, setWindowWidth] = useState(DEFAULT_WINDOW_WIDTH);
 
@@ -106,8 +120,10 @@ function App() {
         setVolume(v);
         setMprRotation(IDENTITY_ROTATION);
         if (v.slices.length > 0) {
-          const { min, max } = getVolumeBounds(v);
-          setMprPosition({ x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 });
+          setMprPosition(volumeCentre(v));
+          const window = defaultWindow(v);
+          setWindowLevel(window.level);
+          setWindowWidth(window.width);
         }
       })
       .catch((e) => !cancelled && setError(describeError(e)))
@@ -116,6 +132,47 @@ function App() {
       cancelled = true;
     };
   }, [selectedPatientId, selectedVolumeId]);
+
+  const valueRange = useMemo<[number, number]>(
+    () => (volume && volume.slices.length > 0 ? realRange(volume) : [-1024, 3071]),
+    [volume]
+  );
+  const minWidth = volume ? minWindowWidth(volume) : 1;
+  const maxWindowWidth = Math.max(minWidth, (valueRange[1] - valueRange[0]) * 2);
+  const dragScale = useMemo(() => {
+    if (!volume || volume.slices.length === 0) return 1;
+    const [min, max] = storedRange(volume);
+    return windowDragScale(min, max);
+  }, [volume]);
+  // Integer-valued data (e.g. HU) keeps whole-number windows, as drags with a scaled sensitivity land between.
+  const integral = minWidth === 1 && (!volume || Number.isInteger(volume.valueIntercept ?? 0));
+  const changeWindowLevel = useCallback(
+    (level: number) => {
+      const clamped = Math.min(valueRange[1], Math.max(valueRange[0], level));
+      setWindowLevel(integral ? Math.round(clamped) : clamped);
+    },
+    [valueRange, integral]
+  );
+  const changeWindowWidth = useCallback(
+    (width: number) => {
+      const clamped = Math.min(maxWindowWidth, Math.max(minWidth, width));
+      setWindowWidth(integral ? Math.round(clamped) : clamped);
+    },
+    [minWidth, maxWindowWidth, integral]
+  );
+
+  const storedWindow = useMemo(
+    () => (volume ? toStoredWindow(volume, { level: windowLevel, width: windowWidth }) : { level: windowLevel, width: windowWidth }),
+    [volume, windowLevel, windowWidth]
+  );
+  const changeStoredWindowLevel = useCallback(
+    (stored: number) => changeWindowLevel(volume ? toRealValue(volume, stored) : stored),
+    [volume, changeWindowLevel]
+  );
+  const changeStoredWindowWidth = useCallback(
+    (stored: number) => changeWindowWidth(volume ? stored * valueSlope(volume) : stored),
+    [volume, changeWindowWidth]
+  );
 
   const selectedPatient = patients.find((p) => p.patientId === selectedPatientId) ?? null;
   const selectedVolume = volumes.find((v) => v.volumeId === selectedVolumeId) ?? null;
@@ -201,38 +258,45 @@ function App() {
         </Alert>
       </Snackbar>
 
+      <WindowDragScaleContext value={dragScale}>
       <Box sx={{ mt: 4 }}>
         {loadingVolume && <CircularProgress />}
         {!loadingVolume && volume && (
           <>
+            {(volume.formatVersion ?? 0) < 1 && (
+              <Alert severity="warning" sx={{ mb: 2 }}>
+                This volume was stored before orientation and value scaling were decoded, so it is shown as an axial
+                stack of raw values. Rescan the data folder (or upload it again) to update it.
+              </Alert>
+            )}
             <Box sx={{ display: 'flex', flexWrap: 'wrap', flexDirection: 'row', alignItems: 'center', gap: 2, mb: 2 }}>
               <CineVolumeViewer
                 volume={volume}
                 sliceIndex={sliceIndex}
                 onSliceIndexChange={setSliceIndex}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
               />
               <MprOverviewViewer
                 volume={volume}
                 planes={mprPlanes}
                 projectionMode={projectionMode}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
               />
             </Box>
             <Box sx={{ mb: 2 }}>
               <VolumeRenderViewer
                 volume={volume}
                 planes={mprPlanes}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
                 onMprPositionChange={setMprPosition}
               />
             </Box>
@@ -244,10 +308,10 @@ function App() {
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
               />
               <ThickMprVolumeViewer
                 volume={volume}
@@ -256,10 +320,10 @@ function App() {
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
                 slabThicknessMm={deferredSlabThicknessMm}
                 projectionMode={projectionMode}
               />
@@ -270,10 +334,10 @@ function App() {
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
               />
               <ThickMprVolumeViewer
                 volume={volume}
@@ -282,10 +346,10 @@ function App() {
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
                 slabThicknessMm={deferredSlabThicknessMm}
                 projectionMode={projectionMode}
               />
@@ -296,10 +360,10 @@ function App() {
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
               />
               <ThickMprVolumeViewer
                 volume={volume}
@@ -308,10 +372,10 @@ function App() {
                 mprRotation={mprRotation}
                 onMprRotationChange={setMprRotation}
                 onViewablePlaneChange={handleMprPlaneChange}
-                windowLevel={windowLevel}
-                windowWidth={windowWidth}
-                onWindowLevelChange={setWindowLevel}
-                onWindowWidthChange={setWindowWidth}
+                windowLevel={storedWindow.level}
+                windowWidth={storedWindow.width}
+                onWindowLevelChange={changeStoredWindowLevel}
+                onWindowWidthChange={changeStoredWindowWidth}
                 slabThicknessMm={deferredSlabThicknessMm}
                 projectionMode={projectionMode}
               />
@@ -319,13 +383,17 @@ function App() {
 
 
             <Typography gutterBottom>
-              Slice {sliceIndex + 1} of {volume.slices.length}
+              Slice {sliceIndex + 1} of {volume.slices.length} ({acquisitionPlane(volume)} acquisition)
             </Typography>
             <WindowLevelControls
               windowLevel={windowLevel}
               windowWidth={windowWidth}
-              onLevelChange={setWindowLevel}
-              onWidthChange={setWindowWidth}
+              minLevel={valueRange[0]}
+              maxLevel={valueRange[1]}
+              maxWidth={maxWindowWidth}
+              units={valueUnits(volume)}
+              onLevelChange={changeWindowLevel}
+              onWidthChange={changeWindowWidth}
             />
             <ThickMprControls
               slabThicknessMm={slabThicknessMm}
@@ -340,6 +408,7 @@ function App() {
           </>
         )}
       </Box>
+      </WindowDragScaleContext>
     </Container>
   );
 }

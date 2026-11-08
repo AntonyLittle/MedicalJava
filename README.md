@@ -5,7 +5,20 @@
 (default `Store/` at the repository root, git-ignored):
 
 - `store.db` – SQLite database with patients, volumes and per-slice geometry.
-- `volumes/*.vol` – one file per volume with raw little-endian int16 pixels, slices back to back in depth order.
+- `volumes/*.vol` – one file per volume with little-endian int16 values, slices back to back in stack order.
+
+Volumes keep the geometry and values of the acquisition:
+
+- **Values** – the DICOM rescale, pixel representation, BitsStored and pixel padding are applied at import. A volume's
+  values map to real ones as `value * valueSlope + valueIntercept` in `valueUnits` (CT: slope 1, intercept 0, `HU`),
+  with `minValue`/`maxValue` giving the real range. Padding (e.g. CT's −2000 outside the scan circle) becomes the
+  lowest real value.
+- **Orientation** – `rowDirection`/`columnDirection` (ImageOrientationPatient) and each slice's `positionX/Y/ZMm`
+  (ImagePositionPatient) are kept, so sagittal, coronal, oblique and gantry-tilted stacks are shown in their true
+  position. Slices are ordered along the stack normal (`depthPositionMm` is the distance along it).
+- **Mixed orientations** – a series acquired in several orientations (e.g. a three-plane localizer) becomes one volume
+  per orientation, named like `series (sagittal)`; stacks with fewer than 3 slices are dropped. A stack whose slice
+  positions don't lie on a straight line is rejected as an import failure.
   `GET …/binary` streams this file directly after the JSON header.
 
 Volumes enter the store in two ways:
@@ -22,6 +35,11 @@ Volumes enter the store in two ways:
 pixel files; deleted data-directory series are not re-imported by later scans. Patient and volume ids are assigned
 at import time and stay stable. Only one service instance should use a store at a time.
 
+The store is versioned (SQLite `user_version`) and upgraded in place at startup. Volumes from older imports are kept
+(shown as raw axial stacks, with a warning in the UI) and data-directory volumes are re-imported by the next scan,
+keeping their ids (a mixed-orientation series is replaced by its parts). Uploaded volumes can't be re-decoded; upload
+them again to update them.
+
 The frontend exposes all of this in the toolbar below the patient/volume selectors:
 - **Upload…** – pick files, a folder or zip archives, or drag them onto the dialog. Shows upload progress.
 - **Delete volume** and **Delete patient** – ask for confirmation first.
@@ -35,7 +53,7 @@ The frontend renders the loaded volume in 3D with WebGL2 ray casting (`frontend/
 even grid, and axes larger than the GPU's 3D texture limit are decimated. No server changes are involved.
 
 - **Modes** – *VR* (colour/opacity transfer-function presets: bone, soft tissue, skin, lung, vessels, with lighting),
-  *Surface* (shaded isosurface at a HU threshold), and *MIP*, *MinIP* and *Avg* projections, which use the shared
+  *Surface* (shaded isosurface at a threshold), and *MIP*, *MinIP* and *Avg* projections, which use the shared
   window level/width.
 - **Clipping** – a clip box per patient axis, and *Cut at MPR plane*, which removes everything on one side of the
   axial, coronal or sagittal MPR plane and follows it as it moves.
@@ -46,6 +64,11 @@ even grid, and axes larger than the GPU's 3D texture limit are decimated. No ser
   level/width). Double-click resets the view. The view is drawn at half resolution while it changes and refined
   once input pauses. Empty bricks of 8³ voxels are skipped.
 
-The store keeps raw CT pixel values (the DICOM rescale is not applied), so presets and the surface threshold are
-specified in HU and converted assuming the usual intercept of −1024. For other data, use the preset *Shift* and
-*Opacity* controls.
+Presets and their *Shift* are in HU, so they apply to CT volumes. For other data (e.g. MR), *VR* ramps opacity across
+the shared window level/width instead, and the surface threshold is in the volume's own units. The 3D view, the MPR
+views and picking all use the volume's acquired orientation, so oblique and tilted stacks line up with the 2D views.
+
+## Tests
+
+- Backend: `mvn test` in `VolumeRESTServiceJava/` (unit tests plus end-to-end tests against series in `Data/`).
+- Frontend: `npm test` in `frontend/` (vitest; volume geometry and MPR sampling).

@@ -2,7 +2,8 @@ import type { Volume } from '../api/types';
 import type { CameraFrame } from './camera';
 import { clippedBox, type ClipBox, type CutPlane } from './clipping';
 import { createProgram, uniformLocator } from './gl';
-import { LUT_MIN_VALUE, LUT_SIZE, LUT_STEP, lutRangeVisible, type RgbColor, type TransferLut } from './transferFunctions';
+import { affineToMat4 } from './affine';
+import { LUT_SIZE, lutRangeVisible, type RgbColor, type TransferLut } from './transferFunctions';
 import { BRICK_SIZE } from './volumeGrid';
 import { uploadVolume, type GpuVolume } from './volumeTexture';
 import vertexSource from './shaders/raycast.vert?raw';
@@ -23,7 +24,7 @@ export interface RenderParams {
   shading: number;
   windowLevel: number;
   windowWidth: number;
-  // Stored value (not HU) of the isosurface.
+  // Stored value of the isosurface.
   isoValue: number;
   isoColor: RgbColor;
   clipBox: ClipBox;
@@ -195,10 +196,10 @@ export class VolumeRenderer {
     }
 
     const { grid } = volume;
-    const { spacing, origin, dims } = grid;
-    const box = clippedBox(grid.box, params.clipBox);
+    const { spacing, dims, voxelBox } = grid;
+    const clip = clippedBox(grid.bounds, params.clipBox);
     const stepMm = Math.min(spacing.x, spacing.y, spacing.z) * params.stepFactor;
-    const diagonal = Math.hypot(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z);
+    const diagonal = Math.hypot(clip.max.x - clip.min.x, clip.max.y - clip.min.y, clip.max.z - clip.min.z);
     const camera = params.camera;
 
     gl.useProgram(this.program);
@@ -222,17 +223,12 @@ export class VolumeRenderer {
     gl.uniform2f(u('uHalfSizeMm'), camera.halfWidthMm, camera.halfHeightMm);
     gl.uniform1f(u('uPerspectiveDistanceMm'), camera.perspectiveDistanceMm);
 
-    gl.uniform3f(u('uTexScale'), 1 / (spacing.x * dims[0]), 1 / (spacing.y * dims[1]), 1 / (spacing.z * dims[2]));
-    gl.uniform3f(
-      u('uTexOffset'),
-      (0.5 - origin.x / spacing.x) / dims[0],
-      (0.5 - origin.y / spacing.y) / dims[1],
-      (0.5 - origin.z / spacing.z) / dims[2]
-    );
-    gl.uniform3f(u('uSpacingMm'), spacing.x, spacing.y, spacing.z);
-
-    gl.uniform3f(u('uBoxMin'), box.min.x, box.min.y, box.min.z);
-    gl.uniform3f(u('uBoxMax'), box.max.x, box.max.y, box.max.z);
+    gl.uniformMatrix4fv(u('uPatientToVoxel'), false, affineToMat4(grid.patientToVoxel));
+    gl.uniform3f(u('uDims'), dims[0], dims[1], dims[2]);
+    gl.uniform3f(u('uVoxelBoxMin'), voxelBox.min.x, voxelBox.min.y, voxelBox.min.z);
+    gl.uniform3f(u('uVoxelBoxMax'), voxelBox.max.x, voxelBox.max.y, voxelBox.max.z);
+    gl.uniform3f(u('uClipMin'), clip.min.x, clip.min.y, clip.min.z);
+    gl.uniform3f(u('uClipMax'), clip.max.x, clip.max.y, clip.max.z);
     const cut = params.cutPlane;
     gl.uniform1i(u('uCutEnabled'), cut ? 1 : 0);
     if (cut) gl.uniform4f(u('uCutPlane'), cut.normal.x, cut.normal.y, cut.normal.z, cut.offsetMm);
@@ -241,14 +237,14 @@ export class VolumeRenderer {
     gl.uniform1i(u('uMaxSteps'), Math.ceil(diagonal / stepMm) + 2);
 
     gl.uniform1i(u('uSkipEmpty'), skipEmpty ? 1 : 0);
-    gl.uniform3f(u('uGridOrigin'), origin.x, origin.y, origin.z);
-    gl.uniform3f(u('uBrickSizeMm'), spacing.x * BRICK_SIZE, spacing.y * BRICK_SIZE, spacing.z * BRICK_SIZE);
+    gl.uniform1f(u('uBrickSize'), BRICK_SIZE);
     const [bx, by, bz] = volume.bricks.dims;
     gl.uniform3i(u('uBrickDims'), bx, by, bz);
 
-    // Texture x of entry i is (i + 0.5) / LUT_SIZE, for value LUT_MIN_VALUE + i * LUT_STEP.
-    gl.uniform1f(u('uLutScale'), 1 / (LUT_STEP * LUT_SIZE));
-    gl.uniform1f(u('uLutOffset'), (0.5 - LUT_MIN_VALUE / LUT_STEP) / LUT_SIZE);
+    // Texture x of entry i is (i + 0.5) / LUT_SIZE, for value lut.minValue + i * lut.step.
+    const lut = params.lut;
+    gl.uniform1f(u('uLutScale'), 1 / (lut.step * LUT_SIZE));
+    gl.uniform1f(u('uLutOffset'), (0.5 - lut.minValue / lut.step) / LUT_SIZE);
     gl.uniform1f(u('uOpacityScale'), params.opacityScale);
     gl.uniform1f(u('uShading'), params.shading);
 

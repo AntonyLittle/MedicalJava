@@ -1,5 +1,18 @@
 import type { ImageGeometry, RadioDensities, Slice, Volume } from '../api/types';
 import { moveViewablePlaneForward, type Coordinate, type ViewablePlane } from './canvasMath';
+import {
+  depthToSliceIndex,
+  toLocalDirection,
+  toLocalPoint,
+  volumeGeometry,
+  type Box,
+  type VolumeGeometry,
+} from './volumeGeometry';
+import { outsideValue } from './volumeValues';
+
+// Sampling works in each volume's own frame (see volumeGeometry), where the slices are an axial-style stack: an
+// image along the volume's own axes then takes the fast separable paths below. Exported functions take and
+// return patient-space planes and points; the internal ones take planes already converted with toLocalPlane.
 
 export type PlaneOrientation = 'axial' | 'coronal' | 'sagittal';
 
@@ -28,9 +41,6 @@ export const MAX_SLAB_SAMPLES = 64;
 // Cheap sample count used while the user is still scrolling or dragging.
 export const PREVIEW_SLAB_SAMPLES = 12;
 
-// Matches the padding value of the sample DICOM data (air = -2000).
-export const OUTSIDE_VOLUME_VALUE = -2000;
-
 const EPSILON = 1e-6;
 
 export function orientationFromNormal(normal: Coordinate): PlaneOrientation {
@@ -43,11 +53,14 @@ export function orientationFromNormal(normal: Coordinate): PlaneOrientation {
 }
 
 interface VolumeInfo {
+  geometry: VolumeGeometry;
+  // Local depth of each slice.
   depths: number[];
   data: Int16Array[];
   // 0 when the slices are not evenly spaced.
   depthStep: number;
-  bounds: { min: Coordinate; max: Coordinate };
+  // Local box around the voxel centres; its minimum corner is the origin unless the stack is sheared.
+  bounds: Box;
 }
 
 // Volumes are immutable once loaded, and these values are needed for every sample of every frame.
@@ -56,32 +69,33 @@ const volumeInfoCache = new WeakMap<Volume, VolumeInfo>();
 function volumeInfo(volume: Volume): VolumeInfo {
   let info = volumeInfoCache.get(volume);
   if (!info) {
-    const first = volume.slices[0];
-    const depths = volume.slices.map((s) => s.depthPositionMm);
-    const last = depths.length - 1;
-    const step = last > 0 ? (depths[last] - depths[0]) / last : 0;
-    const uniform = step > 0 && depths.every((depth, i) => Math.abs(depth - (depths[0] + i * step)) <= 1e-3 * step);
+    const geometry = volumeGeometry(volume);
     info = {
-      depths,
+      geometry,
+      depths: geometry.depths,
       data: volume.slices.map((s) => s.radiodensities),
-      depthStep: uniform ? step : 0,
-      bounds: {
-        min: { x: first.originXMm, y: first.originYMm, z: Math.min(...depths) },
-        max: {
-          x: first.originXMm + (first.widthPixels - 1) * first.pixelSpacingXMm,
-          y: first.originYMm + (first.heightPixels - 1) * first.pixelSpacingYMm,
-          z: Math.max(...depths),
-        },
-      },
+      depthStep: geometry.depthStep,
+      bounds: geometry.localBounds,
     };
     volumeInfoCache.set(volume, info);
   }
   return info;
 }
 
-// Extent of the voxel centres in patient coordinates (mm); assumes slices are sorted by depth and share an x/y origin.
-export function getVolumeBounds(volume: Volume): { min: Coordinate; max: Coordinate } {
-  return volumeInfo(volume).bounds;
+// Patient-space box around the voxel centres (larger than the volume itself when it is oblique).
+export function getVolumeBounds(volume: Volume): Box {
+  return volumeGeometry(volume).bounds;
+}
+
+// The plane in the volume's own frame.
+function toLocalPlane(volume: Volume, plane: ViewablePlane): ViewablePlane {
+  const g = volumeGeometry(volume);
+  return {
+    positionXyz: toLocalPoint(g, plane.positionXyz),
+    normalXyz: toLocalDirection(g, plane.normalXyz),
+    rightXyz: toLocalDirection(g, plane.rightXyz),
+    downXyz: toLocalDirection(g, plane.downXyz),
+  };
 }
 
 // Receives the values for columns colStart..colEnd of one output row; other columns are outside the volume.
@@ -89,20 +103,7 @@ type RowSink = (row: number, colStart: number, colEnd: number, values: Float32Ar
 
 // Fractional slice index for a depth, or NaN when outside the volume.
 function depthToSliceCoordinate(depths: number[], z: number): number {
-  const last = depths.length - 1;
-  if (z < depths[0] - EPSILON || z > depths[last] + EPSILON) return NaN;
-  if (last === 0) return 0;
-
-  let lo = 0;
-  let hi = last;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (depths[mid] <= z) lo = mid;
-    else hi = mid;
-  }
-  const span = depths[hi] - depths[lo];
-  const t = span > 0 ? (z - depths[lo]) / span : 0;
-  return Math.min(last, Math.max(0, lo + t));
+  return depthToSliceIndex(depths, z, EPSILON);
 }
 
 interface AxisWeights {
@@ -149,12 +150,13 @@ function spacingAlongNormal(volume: Volume, orientation: PlaneOrientation): numb
   if (orientation === 'coronal') return pixelSpacingYMm;
   if (orientation === 'sagittal') return pixelSpacingXMm;
 
-  const { min, max } = getVolumeBounds(volume);
+  const { min, max } = volumeInfo(volume).bounds;
   const gaps = volume.slices.length - 1;
   return gaps > 0 ? (max.z - min.z) / gaps : outputSpacing(volume);
 }
 
-export function slabSampleCount(
+// orientation is in the volume's own frame.
+function slabSampleCount(
   volume: Volume,
   orientation: PlaneOrientation,
   thicknessMm: number,
@@ -167,10 +169,10 @@ function dot(a: Coordinate, b: Coordinate): number {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
+// Patient-space centre of the volume.
 export function volumeCentre(volume: Volume): Coordinate {
   if (volume.slices.length === 0) return { x: 0, y: 0, z: 0 };
-  const { min, max } = getVolumeBounds(volume);
-  return { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 };
+  return volumeGeometry(volume).centre;
 }
 
 type PlaneAxes = Pick<ViewablePlane, 'normalXyz' | 'rightXyz' | 'downXyz'>;
@@ -179,9 +181,21 @@ function closeTo(a: Coordinate, b: Coordinate): boolean {
   return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) + Math.abs(a.z - b.z) < 1e-4;
 }
 
-export function isAxisAligned(plane: PlaneAxes): boolean {
+// Whether the local plane runs along the volume's voxel grid, so the separable fast paths apply.
+function isLocalAxisAligned(volume: Volume, plane: PlaneAxes): boolean {
+  if (volumeGeometry(volume).sheared) return false;
   const axes = CANONICAL_AXES[orientationFromNormal(plane.normalXyz)];
   return closeTo(plane.rightXyz, axes.right) && closeTo(plane.downXyz, axes.down);
+}
+
+// Whether a patient-space plane can be sampled without oblique interpolation (e.g. a native acquired slice).
+export function isAxisAligned(volume: Volume, plane: PlaneAxes): boolean {
+  const g = volumeGeometry(volume);
+  return isLocalAxisAligned(volume, {
+    normalXyz: toLocalDirection(g, plane.normalXyz),
+    rightXyz: toLocalDirection(g, plane.rightXyz),
+    downXyz: toLocalDirection(g, plane.downXyz),
+  });
 }
 
 // The sampled image depends only on the plane's axes and its offset along the normal from the volume centre.
@@ -226,7 +240,7 @@ function outputSpacing(volume: Volume): number {
 }
 
 function planeGrid(volume: Volume, orientation: PlaneOrientation, spacing: number): PlaneGrid {
-  const bounds = getVolumeBounds(volume);
+  const { bounds } = volumeInfo(volume);
   const cells = (min: number, max: number) => Math.floor((max - min) / spacing) + 1;
 
   if (orientation === 'axial') {
@@ -391,24 +405,20 @@ interface ObliqueGrid extends PlaneGrid {
   vMin: number;
 }
 
-// Corner index bits: 1 = x, 2 = y, 4 = z (set bit means the max side).
+// Patient-space corner voxel centres. Index bits: 1 = last column, 2 = last row, 4 = last slice, so corners i and
+// i | bit share an edge.
 export function volumeCorners(volume: Volume): Coordinate[] {
-  const { min, max } = getVolumeBounds(volume);
-  return Array.from({ length: 8 }, (_, i) => ({
-    x: i & 1 ? max.x : min.x,
-    y: i & 2 ? max.y : min.y,
-    z: i & 4 ? max.z : min.z,
-  }));
+  return volumeGeometry(volume).corners;
 }
 
-// Bounding rectangle of the volume's corners on the plane's axes, measured from the volume centre.
+// Bounding rectangle of the volume's corners on the local plane's axes, measured from the volume centre.
 function projectedExtent(volume: Volume, plane: PlaneAxes): { uMin: number; uMax: number; vMin: number; vMax: number } {
-  const centre = volumeCentre(volume);
+  const { localCentre: centre, localCorners } = volumeGeometry(volume);
   let uMin = Infinity;
   let uMax = -Infinity;
   let vMin = Infinity;
   let vMax = -Infinity;
-  for (const corner of volumeCorners(volume)) {
+  for (const corner of localCorners) {
     const relative = { x: corner.x - centre.x, y: corner.y - centre.y, z: corner.z - centre.z };
     const u = dot(relative, plane.rightXyz);
     const v = dot(relative, plane.downXyz);
@@ -430,7 +440,7 @@ function obliqueGrid(volume: Volume, plane: PlaneAxes, spacing: number): Oblique
   };
 }
 
-export function planeImageGeometry(
+function planeImageGeometry(
   volume: Volume,
   plane: PlaneAxes,
   spacingUMm: number,
@@ -440,7 +450,7 @@ export function planeImageGeometry(
   return { uMinMm: uMin, vMinMm: vMin, spacingUMm, spacingVMm };
 }
 
-// Thickness of a slab centred on the volume that contains every voxel along the given normal.
+// Thickness of a slab centred on the volume that contains every voxel along the given patient-space normal.
 export function fullVolumeThicknessMm(volume: Volume, normal: Coordinate): number {
   const centre = volumeCentre(volume);
   let halfExtent = 0;
@@ -451,9 +461,14 @@ export function fullVolumeThicknessMm(volume: Volume, normal: Coordinate): numbe
   return halfExtent * 2;
 }
 
-// Spacing multiplier that keeps the longest side of the plane's image under maxPixels.
+// Spacing multiplier that keeps the longest side of the (patient-space) plane's image under maxPixels.
 export function fitSpacingScale(volume: Volume, plane: PlaneAxes, maxPixels: number): number {
-  const { uMin, uMax, vMin, vMax } = projectedExtent(volume, plane);
+  const g = volumeGeometry(volume);
+  const { uMin, uMax, vMin, vMax } = projectedExtent(volume, {
+    normalXyz: toLocalDirection(g, plane.normalXyz),
+    rightXyz: toLocalDirection(g, plane.rightXyz),
+    downXyz: toLocalDirection(g, plane.downXyz),
+  });
   const extentMm = Math.max(uMax - uMin, vMax - vMin);
   return Math.max(1, extentMm / (maxPixels * outputSpacing(volume)));
 }
@@ -515,14 +530,14 @@ function sampleObliquePlane(
 ): void {
   const slices = volume.slices;
   const { widthPixels: width, heightPixels: height, pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
-  const originX = slices[0].originXMm;
-  const originY = slices[0].originYMm;
-  const { depths, depthStep, data } = volumeInfo(volume);
+  const { depths, depthStep, data, geometry } = volumeInfo(volume);
+  // Sheared stacks shift each slice in-plane in proportion to its depth.
+  const { x: shearX, y: shearY } = geometry.shear;
   const lastSlice = depths.length - 1;
   const lastX = width - 1;
   const lastY = height - 1;
 
-  const centre = volumeCentre(volume);
+  const centre = geometry.localCentre;
   const n = plane.normalXyz;
   const r = plane.rightXyz;
   const d = plane.downXyz;
@@ -535,8 +550,8 @@ function sampleObliquePlane(
   const startZ = centre.z + n.z * offset + r.z * grid.uMin + d.z * grid.vMin;
 
   // Change in voxel coordinates per output column.
-  const dfx = (r.x * spacing) / sx;
-  const dfy = (r.y * spacing) / sy;
+  const dfx = ((r.x - shearX * r.z) * spacing) / sx;
+  const dfy = ((r.y - shearY * r.z) * spacing) / sy;
   const dfz = depthStep > 0 ? (r.z * spacing) / depthStep : 0;
   const range = { lo: 0, hi: 0 };
 
@@ -544,8 +559,8 @@ function sampleObliquePlane(
     const px = startX + d.x * spacing * row;
     const py = startY + d.y * spacing * row;
     const pz = startZ + d.z * spacing * row;
-    const fx0 = (px - originX) / sx;
-    const fy0 = (py - originY) / sy;
+    const fx0 = (px - shearX * pz) / sx;
+    const fy0 = (py - shearY * pz) / sy;
     const fz0 = depthStep > 0 ? (pz - depths[0]) / depthStep : 0;
 
     range.lo = 0;
@@ -582,7 +597,7 @@ interface PlaneSampling {
 
 // The grid is fixed for a given rotation, so slab sub-planes (shifted along the normal) reuse it.
 function createPlaneSampling(volume: Volume, plane: ViewablePlane, spacingScale: number): PlaneSampling {
-  if (isAxisAligned(plane)) {
+  if (isLocalAxisAligned(volume, plane)) {
     const layout = planeLayout(volume, orientationFromNormal(plane.normalXyz), spacingScale);
     const rowBuf = new Float32Array(layout.grid.widthPixels);
     return {
@@ -603,11 +618,12 @@ function createPlaneSampling(volume: Volume, plane: ViewablePlane, spacingScale:
   };
 }
 
-export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane, spacingScale = 1): RadioDensities | undefined {
+export function sampleCrossSection(volume: Volume, patientPlane: ViewablePlane, spacingScale = 1): RadioDensities | undefined {
   const slices = volume.slices;
   if (slices.length === 0) return undefined;
+  const viewablePlane = toLocalPlane(volume, patientPlane);
 
-  if (isAxisAligned(viewablePlane) && orientationFromNormal(viewablePlane.normalXyz) === 'axial') {
+  if (isLocalAxisAligned(volume, viewablePlane) && orientationFromNormal(viewablePlane.normalXyz) === 'axial') {
     const fz = depthToSliceCoordinate(volumeInfo(volume).depths, viewablePlane.positionXyz.z);
     if (Number.isNaN(fz)) return undefined;
     const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = slices[0];
@@ -623,7 +639,7 @@ export function sampleCrossSection(volume: Volume, viewablePlane: ViewablePlane,
   }
 
   const { grid, spacingU, spacingV, run } = createPlaneSampling(volume, viewablePlane, spacingScale);
-  const out = new Float32Array(grid.widthPixels * grid.heightPixels).fill(OUTSIDE_VOLUME_VALUE);
+  const out = new Float32Array(grid.widthPixels * grid.heightPixels).fill(outsideValue(volume));
   run(viewablePlane, (row, colStart, colEnd, values) => {
     const base = row * grid.widthPixels;
     for (let col = colStart; col <= colEnd; col++) {
@@ -697,16 +713,13 @@ function readVoxel(
 // as the slab slides instead of jumping when a slice enters or leaves. step > 1 decimates pixels for cheap previews.
 function* sampleAxialSlabFromSlices(
   slices: Slice[],
+  depths: number[],
   centreZ: number,
   slab: SlabOptions,
   step: number,
   geometry: ImageGeometry
 ): SlabJob {
-  const weights = coverageWeights(
-    slices.map((s) => s.depthPositionMm),
-    centreZ - slab.thicknessMm / 2,
-    centreZ + slab.thicknessMm / 2
-  );
+  const weights = coverageWeights(depths, centreZ - slab.thicknessMm / 2, centreZ + slab.thicknessMm / 2);
   if (weights.every((w) => w === 0)) return undefined;
 
   const { widthPixels, heightPixels } = slices[0];
@@ -777,7 +790,8 @@ function* sampleSideSlabFromVoxelPlanes(
   const alongY = orientation === 'coronal';
 
   const planeCount = alongY ? height : width;
-  const planeOrigin = alongY ? slices[0].originYMm : slices[0].originXMm;
+  // Local coordinates start at the first voxel.
+  const planeOrigin = 0;
   const planeSpacing = alongY ? sy : sx;
   const centreAlong = alongY ? plane.positionXyz.y : plane.positionXyz.x;
   const positions = Array.from({ length: planeCount }, (_, j) => planeOrigin + j * planeSpacing);
@@ -917,20 +931,22 @@ export function sampleSlab(volume: Volume, viewablePlane: ViewablePlane, slab: S
   return runToCompletion(sampleSlabJob(volume, viewablePlane, slab));
 }
 
-export function* sampleSlabJob(volume: Volume, viewablePlane: ViewablePlane, slab: SlabOptions): SlabJob {
+export function* sampleSlabJob(volume: Volume, patientPlane: ViewablePlane, slab: SlabOptions): SlabJob {
   if (volume.slices.length === 0) return undefined;
 
+  const viewablePlane = toLocalPlane(volume, patientPlane);
   const maxSamples = slab.maxSamples ?? MAX_SLAB_SAMPLES;
   const spacingScale = slab.spacingScale ?? 1;
   const orientation = orientationFromNormal(viewablePlane.normalXyz);
-  const aligned = isAxisAligned(viewablePlane);
+  const aligned = isLocalAxisAligned(volume, viewablePlane);
   const sampleCount = slabSampleCount(volume, orientation, slab.thicknessMm, maxSamples);
-  if (sampleCount <= 1) return sampleCrossSection(volume, viewablePlane, spacingScale);
+  if (sampleCount <= 1) return sampleCrossSection(volume, patientPlane, spacingScale);
 
   const { pixelSpacingXMm: sx, pixelSpacingYMm: sy } = volume.slices[0];
   if (aligned && orientation === 'axial' && sx === sy && Number.isInteger(spacingScale)) {
     const direct = yield* sampleAxialSlabFromSlices(
       volume.slices,
+      volumeInfo(volume).depths,
       viewablePlane.positionXyz.z,
       slab,
       spacingScale,
@@ -988,8 +1004,9 @@ export function* sampleSlabJob(volume: Volume, viewablePlane: ViewablePlane, sla
   }
 
   const out = new Float32Array(size);
+  const outside = outsideValue(volume);
   for (let i = 0; i < size; i++) {
-    if (counts[i] === 0) out[i] = OUTSIDE_VOLUME_VALUE;
+    if (counts[i] === 0) out[i] = outside;
     else out[i] = slab.mode === 'average' ? accumulated[i] / counts[i] : accumulated[i];
   }
   return { ...grid, radiodensities: out, geometry: planeImageGeometry(volume, viewablePlane, spacingU, spacingV) };
